@@ -27,6 +27,8 @@
 #
 # Usage:
 #   python script/pre_custom.py --videopath data/leopard --startframe 0 --endframe 37
+#
+# After running, set "duration": <endframe - startframe> in your training config.
 
 import os
 import glob
@@ -42,7 +44,7 @@ from thirdparty.gaussian_splatting.helper3dg import getcolmapsinglecustom
 
 
 def convertimage(imagepath):
-    """Read and convert to 8-bit RGB, return None if missing."""
+    """Read and convert to 8-bit RGB. Alpha is saved separately as _mask.png."""
     img = cv2.imread(imagepath, cv2.IMREAD_UNCHANGED)
     if img is None:
         return None
@@ -53,9 +55,25 @@ def convertimage(imagepath):
     return img
 
 
+def extractalpha(imagepath, target_hw=None):
+    """Extract 8-bit alpha mask from an RGBA source image.
+    Resizes to target_hw=(H, W) if given. Returns None if no alpha channel.
+    """
+    src = cv2.imread(imagepath, cv2.IMREAD_UNCHANGED)
+    if src is None or src.ndim < 3 or src.shape[2] < 4:
+        return None
+    if src.dtype == np.uint16:
+        src = (src / 256).astype(np.uint8)
+    alpha = src[:, :, 3]
+    if target_hw is not None and alpha.shape[:2] != tuple(target_hw):
+        alpha = cv2.resize(alpha, (target_hw[1], target_hw[0]),
+                           interpolation=cv2.INTER_NEAREST)
+    return alpha
+
+
 def preparecolmapframes(folder, offset=0):
     """Copy one frame per camera into colmap_<offset>/input/ for COLMAP.
-    Converts 16-bit RGBA to 8-bit RGB as COLMAP requires 8-bit input.
+    Converts 16-bit RGBA to 8-bit RGB (COLMAP requires 8-bit RGB input).
     """
     folderlist = sorted(glob.glob(os.path.join(folder, "cam_*/")))
     savedir = os.path.join(folder, "colmap_" + str(offset), "input")
@@ -73,34 +91,75 @@ def preparecolmapframes(folder, offset=0):
                 cv2.imwrite(imagesavepath, img)
 
 
+def applysourcealpha(folder, offset):
+    """Save a greyscale _mask.png alongside each image in colmap_<offset>/images/.
+    COLMAP's image_undistorter strips alpha; this recovers it from the source
+    RGBA frames. loadCam detects the paired file and uses it as a foreground mask
+    so background pixels contribute zero loss during training.
+    """
+    folderlist = sorted(glob.glob(os.path.join(folder, "cam_*/")))
+    savedir = os.path.join(folder, "colmap_" + str(offset), "images")
+    for camfolder in folderlist:
+        camname = os.path.basename(camfolder.rstrip("/"))
+        srcpath = os.path.join(camfolder, str(offset).zfill(5) + ".png")
+        dstpath = os.path.join(savedir, camname + ".png")
+        maskpath = os.path.join(savedir, camname + "_mask.png")
+        if not os.path.exists(srcpath) or not os.path.exists(dstpath):
+            continue
+        if os.path.exists(maskpath):
+            continue
+        ref = cv2.imread(dstpath, cv2.IMREAD_COLOR)
+        if ref is None:
+            continue
+        alpha = extractalpha(srcpath, target_hw=ref.shape[:2])
+        if alpha is not None:
+            cv2.imwrite(maskpath, alpha)
+
+
 def prepareimagesonly(folder, offset):
-    """For frames after frame 0: just place converted images in colmap_<offset>/images/.
-    Camera poses come from colmap_0, so no COLMAP needed for subsequent frames.
-    Symlinks colmap_0/sparse/0/points3D.bin so the scene loader can build
-    the combined temporal point cloud.
+    """For frames after frame 0: place RGB images + _mask.png in colmap_<offset>/images/.
+    Camera poses come from colmap_0 (static rig), so no COLMAP needed.
+    Symlinks points3D.bin from colmap_0 for scene initialisation.
     """
     folderlist = sorted(glob.glob(os.path.join(folder, "cam_*/")))
     savedir = os.path.join(folder, "colmap_" + str(offset), "images")
     os.makedirs(savedir, exist_ok=True)
+
+    ref_images_dir = os.path.join(folder, "colmap_0", "images")
+
     for camfolder in folderlist:
         camname = os.path.basename(camfolder.rstrip("/"))
         imagepath = os.path.join(camfolder, str(offset).zfill(5) + ".png")
         if not os.path.exists(imagepath):
             print(f"warning: missing frame {imagepath}, skipping")
             continue
+
         imagesavepath = os.path.join(savedir, camname + ".png")
+        maskpath = os.path.join(savedir, camname + "_mask.png")
+
+        # Determine target size from colmap_0 undistorted image
+        ref_path = os.path.join(ref_images_dir, camname + ".png")
+        target_hw = None
+        if os.path.exists(ref_path):
+            ref = cv2.imread(ref_path, cv2.IMREAD_COLOR)
+            if ref is not None:
+                target_hw = ref.shape[:2]  # (H, W)
+
+        # Save RGB image
         if not os.path.exists(imagesavepath):
             img = convertimage(imagepath)
             if img is not None:
-                # resize to match colmap_0 undistorted dimensions so rays align
-                ref_path = os.path.join(folder, "colmap_0", "images", camname + ".png")
-                if os.path.exists(ref_path):
-                    ref = cv2.imread(ref_path)
-                    if ref is not None:
-                        img = cv2.resize(img, (ref.shape[1], ref.shape[0]))
+                if target_hw is not None:
+                    img = cv2.resize(img, (target_hw[1], target_hw[0]))
                 cv2.imwrite(imagesavepath, img)
 
-    # symlink sparse/0/points3D.bin from colmap_0 so the scene loader can read it
+        # Save alpha mask
+        if not os.path.exists(maskpath):
+            alpha = extractalpha(imagepath, target_hw=target_hw)
+            if alpha is not None:
+                cv2.imwrite(maskpath, alpha)
+
+    # Symlink points3D.bin from colmap_0 for scene initialisation
     sparse_dst = os.path.join(folder, "colmap_" + str(offset), "sparse", "0")
     os.makedirs(sparse_dst, exist_ok=True)
     src = os.path.abspath(os.path.join(folder, "colmap_0", "sparse", "0", "points3D.bin"))
@@ -130,16 +189,22 @@ if __name__ == "__main__":
     if not videopath.endswith("/"):
         videopath = videopath + "/"
 
+    duration = endframe - startframe
+    print(f"Preparing {duration} frame(s) [{startframe}..{endframe-1}]")
+    print(f"  → set \"duration\": {duration} in your training config")
+
     # Frame 0: full COLMAP SfM to recover camera poses
     if startframe == 0:
         print("preparing colmap input for frame 0")
         preparecolmapframes(videopath, 0)
         print("running full COLMAP SfM for frame 0 (feature extraction, matching, mapper, undistortion)")
         getcolmapsinglecustom(videopath, 0)
+        print("saving alpha masks for frame 0")
+        applysourcealpha(videopath, 0)
 
-    # Frames 1+: cameras are static, just place images — no COLMAP needed
+    # Frames 1+: static rig, just place images and masks — no COLMAP needed
     remaining = range(max(startframe, 1), endframe)
     if remaining:
-        print(f"preparing images for frames {remaining.start}-{remaining.stop - 1} (no COLMAP needed, using poses from frame 0)")
+        print(f"preparing frames {remaining.start}–{remaining.stop - 1}")
         for offset in tqdm.tqdm(remaining):
             prepareimagesonly(videopath, offset)

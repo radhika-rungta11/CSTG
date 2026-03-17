@@ -376,6 +376,68 @@ def getcolmapsingletechni(folder, offset):
         source_file = os.path.join(folder, "sparse", file)
         destination_file = os.path.join(folder, "sparse", "0", file)
         shutil.move(source_file, destination_file)
-    
-    return 
-    
+
+    return
+
+
+def getcolmapsinglecustom(folder, offset):
+    """Full SfM pipeline for custom datasets with no known poses.
+    Uses colmap mapper (not point_triangulator) to estimate intrinsics and
+    extrinsics from scratch.
+    """
+    folder = os.path.join(folder, "colmap_" + str(offset))
+    assert os.path.exists(folder)
+
+    dbfile = os.path.join(folder, "input.db")
+    inputimagefolder = os.path.join(folder, "input")
+    distortedmodel = os.path.join(folder, "distorted", "sparse")
+    if not os.path.exists(distortedmodel):
+        os.makedirs(distortedmodel)
+
+    featureextract = "colmap feature_extractor --database_path " + dbfile + " --image_path " + inputimagefolder
+    exit_code = os.system(featureextract)
+    if exit_code != 0:
+        exit(exit_code)
+
+    featurematcher = "colmap exhaustive_matcher --database_path " + dbfile
+    exit_code = os.system(featurematcher)
+    if exit_code != 0:
+        exit(exit_code)
+
+    # mapper estimates poses from scratch (no prior model needed)
+    mapper = "colmap mapper --database_path " + dbfile + " --image_path " + inputimagefolder \
+        + " --output_path " + distortedmodel + " --Mapper.ba_global_function_tolerance=0.000001"
+    exit_code = os.system(mapper)
+    if exit_code != 0:
+        exit(exit_code)
+    print(mapper)
+
+    # mapper writes to distorted/sparse/0 — use that as input to undistorter.
+    # COLMAP's image_undistorter CHECKs that its output images/ dir does not
+    # already exist; wipe it (and sparse/) before every run so re-runs are safe.
+    mapperout = os.path.join(distortedmodel, "0")
+    for _d in ["images", "sparse", "stereo"]:
+        _p = os.path.join(folder, _d)
+        if os.path.exists(_p):
+            shutil.rmtree(_p)
+    img_undist_cmd = "colmap image_undistorter --image_path " + inputimagefolder \
+        + " --input_path " + mapperout + " --output_path " + folder \
+        + " --output_type COLMAP"
+    exit_code = os.system(img_undist_cmd)
+    if exit_code != 0:
+        exit(exit_code)
+    print(img_undist_cmd)
+
+    removeinput = "rm -r " + inputimagefolder
+    exit_code = os.system(removeinput)
+    if exit_code != 0:
+        exit(exit_code)
+
+    files = os.listdir(folder + "/sparse")
+    os.makedirs(folder + "/sparse/0", exist_ok=True)
+    for file in files:
+        if file == '0':
+            continue
+        source_file = os.path.join(folder, "sparse", file)
+        destination_file = os.path.join(folder, "sparse", "0", file)
+        shutil.move(source_file, destination_file)

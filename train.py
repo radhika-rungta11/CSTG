@@ -178,9 +178,14 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
             for i in range(opt.batch):
                 viewpoint_cam = camindex[i]
                 render_pkg = render(viewpoint_cam, gaussians, pipe, background,  override_color=None,  basicfunction=rbfbasefunction, GRsetting=GRsetting, GRzer=GRzer, rvq_iter=(iteration > opt.rvq_iter))
-                image, viewspace_point_tensor, visibility_filter, radii = getrenderparts(render_pkg) 
+                image, viewspace_point_tensor, visibility_filter, radii = getrenderparts(render_pkg)
                 gt_image = viewpoint_cam.original_image.float().cuda()
-                
+
+                # Apply foreground mask to rendered image so background pixels
+                # contribute zero loss (gt_image is already masked by Camera class)
+                if getattr(viewpoint_cam, 'gt_alpha_mask', None) is not None:
+                    image = image * viewpoint_cam.gt_alpha_mask.float()
+
                 if opt.reg == 2:
                     Ll1 = l2_loss(image, gt_image)
                     loss = Ll1
@@ -251,7 +256,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
             # Densification and pruning here
             
-            if iteration < opt.densify_until_iter :
+            if iteration < opt.densify_until_iter and iteration < opt.iterations:
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
             else:

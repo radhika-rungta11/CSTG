@@ -46,20 +46,29 @@ def loadCam(args, id, cam_info, resolution_scale):
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
 
-    if resized_image_rgb.shape[1] == 4:
+    if resized_image_rgb.shape[0] == 4:
+        # image was saved as RGBA — use 4th channel directly
         loaded_mask = resized_image_rgb[3:4, ...]
+    elif cam_info.image_path is not None:
+        # look for a paired greyscale mask file: cam_XXX_mask.png
+        mask_path = cam_info.image_path.replace(".png", "_mask.png")
+        if os.path.exists(mask_path):
+            from PIL import Image as PILImage
+            import torchvision.transforms.functional as TF
+            mask_pil = PILImage.open(mask_path).convert("L").resize(resolution, PILImage.NEAREST)
+            loaded_mask = TF.to_tensor(mask_pil)  # [1, H, W] in [0, 1]
 
     cameradirect = cam_info.hpdirecitons
-    camerapose = cam_info.pose 
-     
+    camerapose = cam_info.pose
+
     if camerapose is not None:
         c2w = torch.FloatTensor(camerapose)
         rays_o, rays_d = get_image_rays(cameradirect, c2w)# get_image_rays          get_rays
     else :
         rays_o = None
         rays_d = None
-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
+    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY,
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device, near=cam_info.near, far=cam_info.far, timestamp=cam_info.timestamp, rayo=rays_o, rayd=rays_d)
 
