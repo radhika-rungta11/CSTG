@@ -13,6 +13,7 @@
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include <float.h>
 #include "simple_knn.h"
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>

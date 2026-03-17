@@ -502,7 +502,7 @@ class GaussianModel:
         min_val = torch.amin(param)
         if prune:
             param = param*(torch.abs(param) > 0.1)
-        param = (param - min_val)/(max_val - min_val + 1e-8)
+        param = (param - min_val)/(max_val - min_val)
         quant = torch.round(param * 255.0)
         out = (max_val - min_val)*quant/255.0 + min_val
         return torch.nn.Parameter(out), quant, torch.tensor([min_val, max_val])
@@ -961,12 +961,8 @@ class GaussianModel:
         self.prune_points(prune_mask)
         torch.cuda.empty_cache()
     
-    def final_prune(self, compress=False, prune=True):
-        if prune:
-            self.mask_prune()
-            opacity_mask = (self.get_opacity < 0.005).squeeze()
-            self.prune_points(opacity_mask)
-            torch.cuda.empty_cache()
+    def final_prune(self, compress=False):
+        self.mask_prune()
         
         if compress:
             self._sort_morton()

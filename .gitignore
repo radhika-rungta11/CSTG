@@ -1,1 +1,9 @@
 .DS_Store
+__pycache__/
+data/
+log/
+output/
+script/__pycache__/
+thirdparty/colmap/__pycache__/
+thirdparty/gaussian_splatting/submodules/simple-knn/simple_knn.egg-info/
+thirdparty/mmcv/

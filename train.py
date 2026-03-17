@@ -251,7 +251,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
             # Densification and pruning here
             
-            if iteration < opt.densify_until_iter and iteration < opt.iterations:
+            if iteration < opt.densify_until_iter :
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
             else:
