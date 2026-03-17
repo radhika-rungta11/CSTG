@@ -1,11 +1,11 @@
 #!/bin/bash
 
 
-conda create -n dynamic_c3dgs python=3.7.13
+conda create -n dynamic_c3dgs python=3.10
 conda activate dynamic_c3dgs
 
-# seems that we sometimes got stuck in environment.yml, so we install the packages one by one
-conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6 -c pytorch -c conda-forge
+# PyTorch 2.7.1+cu128: first version with Blackwell (sm_120) support; requires Python 3.9+
+pip install torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
 
 
 # Install for Gaussian Rasterization (Ch9) - Ours-Full
@@ -25,12 +25,8 @@ pip install -e .
 cd ../../
 
 # other packages
-pip install natsort
 pip install scipy
 pip install kornia
-# install colmap for preprocess, work with python3.8
-conda create -n colmapenv python=3.8
-conda activate colmapenv
 pip install opencv-python-headless
 pip install tqdm
 pip install natsort
@@ -40,9 +36,4 @@ pip install vector-quantize-pytorch==1.8.1
 pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
 pip install plyfile
 pip install scikit-image
-# just some files need torch be installed.
-conda install pytorch==1.12.1 -c pytorch -c conda-forge
-conda config --set channel_priority false
 conda install colmap -c conda-forge
-
-conda activate dynamic_c3dgs
