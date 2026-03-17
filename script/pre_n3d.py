@@ -37,30 +37,30 @@ from thirdparty.gaussian_splatting.helper3dg import getcolmapsinglen3d
 
 
 
-def extractframes(videopath):
-    cam = cv2.VideoCapture(videopath)
-    ctr = 0
-    sucess = True
-    for i in range(300):
-        if os.path.exists(os.path.join(videopath.replace(".mp4", ""), str(i) + ".png")):
-            ctr += 1
-    if ctr == 300 or ctr == 150: # 150 for 04_truck 
-        print("already extracted all the frames, skip extracting")
+def extractframes(videopath, frames_needed=None):
+    # frames_needed: list of frame indices to extract; None means all 300
+    if frames_needed is None:
+        frames_needed = list(range(300))
+
+    framedir = videopath.replace(".mp4", "")
+    if not os.path.exists(framedir):
+        os.makedirs(framedir)
+
+    # skip if all needed frames already exist
+    missing = [i for i in frames_needed
+               if not os.path.exists(os.path.join(framedir, str(i) + ".png"))]
+    if not missing:
+        print("already extracted needed frames, skip extracting")
         return
-    ctr = 0
-    while ctr < 300:
-        try:
-            _, frame = cam.read()
 
-            savepath = os.path.join(videopath.replace(".mp4", ""), str(ctr) + ".png")
-            if not os.path.exists(videopath.replace(".mp4", "")) :
-                os.makedirs(videopath.replace(".mp4", ""))
-
-            cv2.imwrite(savepath, frame)
-            ctr += 1 
-        except:
-            sucess = False
-            print("error")
+    cam = cv2.VideoCapture(videopath)
+    for idx in missing:
+        cam.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = cam.read()
+        if ret:
+            cv2.imwrite(os.path.join(framedir, str(idx) + ".png"), frame)
+        else:
+            print(f"error reading frame {idx} from {videopath}")
     cam.release()
     return
 
@@ -197,10 +197,11 @@ if __name__ == "__main__" :
     
     
     ##### step1
-    print("start extracting 300 frames from videos")
+    frames_needed = list(range(startframe, endframe))
+    print(f"start extracting frames {frames_needed} from videos")
     videoslist = glob.glob(videopath + "*.mp4")
     for v in tqdm.tqdm(videoslist):
-        extractframes(v)
+        extractframes(v, frames_needed)
 
     
 

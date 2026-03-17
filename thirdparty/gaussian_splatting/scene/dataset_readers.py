@@ -79,36 +79,15 @@ def getNerfppNorm(cam_info):
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, near, far, startime=0, duration=50):
     cam_infos = []
 
-    # pose in llff. pipeline by hypereel 
+    # pose in llff. pipeline by hypereel
     originnumpy = os.path.join(os.path.dirname(os.path.dirname(images_folder)), "poses_bounds.npy")
-    with open(originnumpy, 'rb') as numpy_file:
-        poses_bounds = np.load(numpy_file)
-
-
-        poses = poses_bounds[:, :15].reshape(-1, 3, 5)
-        bounds = poses_bounds[:, -2:]
-
-
-        near = bounds.min() * 0.95
-        far = bounds.max() * 1.05
-        
-        poses = poses_bounds[:, :15].reshape(-1, 3, 5) # 19, 3, 5
-
-
-
-
-
-        H, W, focal = poses[0, :, -1]
-        cx, cy = W / 2.0, H / 2.0
-
-        K = np.eye(3)
-        K[0, 0] = focal * W / W / 2.0
-        K[0, 2] = cx * W / W / 2.0
-        K[1, 1] = focal * H / H / 2.0
-        K[1, 2] = cy * H / H / 2.0
-        
-        imageH = int (H//2) # note hard coded to half of the original image size
-        imageW = int (W//2)
+    if os.path.exists(originnumpy):
+        with open(originnumpy, 'rb') as numpy_file:
+            poses_bounds = np.load(numpy_file)
+            bounds = poses_bounds[:, -2:]
+            near = bounds.min() * 0.95
+            far = bounds.max() * 1.05
+    # else: use default near/far passed as arguments (for datasets without poses_bounds.npy)
       
     totalcamname = []
     for idx, key in enumerate(cam_extrinsics): # first is cam20_ so we strictly sort by camera name
