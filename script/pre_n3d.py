@@ -37,54 +37,66 @@ from thirdparty.gaussian_splatting.helper3dg import getcolmapsinglen3d
 
 
 
-def extractframes(videopath):
-    cam = cv2.VideoCapture(videopath)
-    ctr = 0
-    sucess = True
-    for i in range(300):
-        if os.path.exists(os.path.join(videopath.replace(".mp4", ""), str(i) + ".png")):
-            ctr += 1
-    if ctr == 300 or ctr == 150: # 150 for 04_truck 
-        print("already extracted all the frames, skip extracting")
+def extractframes(videopath, startframe=0, endframe=300):
+    outdir = videopath.replace(".mp4", "")
+    needed = list(range(startframe, endframe))
+    if all(os.path.exists(os.path.join(outdir, str(i) + ".png")) for i in needed):
+        print("already extracted needed frames, skip extracting")
         return
-    ctr = 0
-    while ctr < 300:
-        try:
-            _, frame = cam.read()
-
-            savepath = os.path.join(videopath.replace(".mp4", ""), str(ctr) + ".png")
-            if not os.path.exists(videopath.replace(".mp4", "")) :
-                os.makedirs(videopath.replace(".mp4", ""))
-
-            cv2.imwrite(savepath, frame)
-            ctr += 1 
-        except:
-            sucess = False
-            print("error")
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    cam = cv2.VideoCapture(videopath)
+    for i in range(endframe):
+        success, frame = cam.read()
+        if not success:
+            print(f"error reading frame {i}")
+            break
+        if i >= startframe:
+            cv2.imwrite(os.path.join(outdir, str(i) + ".png"), frame)
     cam.release()
-    return
+
+
+def resolveframepath(camfolder, frame_idx):
+    """Find the image for frame_idx, supporting plain (0.png) or zero-padded (00000.png) naming."""
+    plain = os.path.join(camfolder, str(frame_idx) + ".png")
+    if os.path.exists(plain):
+        return plain
+    # try zero-padded variants (up to 5 digits)
+    for pad in range(2, 6):
+        padded = os.path.join(camfolder, str(frame_idx).zfill(pad) + ".png")
+        if os.path.exists(padded):
+            return padded
+    raise FileNotFoundError(f"No image for frame {frame_idx} in {camfolder}")
 
 
 def preparecolmapdynerf(folder, offset=0):
-    folderlist = glob.glob(folder + "cam**/")
-    imagelist = []
+    folderlist = sorted(glob.glob(folder + "cam**/"))
     savedir = os.path.join(folder, "colmap_" + str(offset))
     if not os.path.exists(savedir):
         os.mkdir(savedir)
     savedir = os.path.join(savedir, "input")
     if not os.path.exists(savedir):
         os.mkdir(savedir)
-    for folder in folderlist :
-        imagepath = os.path.join(folder, str(offset) + ".png")
-        imagesavepath = os.path.join(savedir, folder.split("/")[-2] + ".png")
-
+    for camfolder in folderlist:
+        imagepath = resolveframepath(camfolder, offset)
+        imagesavepath = os.path.join(savedir, camfolder.split("/")[-2] + ".png")
         shutil.copy(imagepath, imagesavepath)
 
 
-    
+def getcampaths(path):
+    """Return sorted list of (name, source) tuples for cameras, from videos or image folders."""
+    video_paths = sorted(glob.glob(os.path.join(path, 'cam*.mp4')))
+    if video_paths:
+        return video_paths, "video"
+    cam_folders = sorted(glob.glob(os.path.join(path, 'cam*/')))
+    if cam_folders:
+        return cam_folders, "images"
+    raise RuntimeError(f"No cam*.mp4 files or cam*/ folders found in {path}")
+
+
 def convertdynerftocolmapdb(path, offset=0):
     originnumpy = os.path.join(path, "poses_bounds.npy")
-    video_paths = sorted(glob.glob(os.path.join(path, 'cam*.mp4')))
+    cam_sources, source_type = getcampaths(path)
     projectfolder = os.path.join(path, "colmap_" + str(offset))
     #sparsefolder = os.path.join(projectfolder, "sparse/0")
     manualfolder = os.path.join(projectfolder, "manual")
@@ -117,7 +129,11 @@ def convertdynerftocolmapdb(path, offset=0):
 
 
         for i in range(len(poses)):
-            cameraname = os.path.basename(video_paths[i])[:-4]#"cam" + str(i).zfill(2)
+            src = cam_sources[i]
+            if source_type == "video":
+                cameraname = os.path.basename(src)[:-4]  # strip .mp4
+            else:
+                cameraname = os.path.basename(src.rstrip("/"))
             m = w2c_matriclist[i]
             colmapR = m[:3, :3]
             T = m[:3, 3]
@@ -197,14 +213,15 @@ if __name__ == "__main__" :
     
     
     ##### step1
-    print("start extracting 300 frames from videos")
     videoslist = glob.glob(videopath + "*.mp4")
-    for v in tqdm.tqdm(videoslist):
-        extractframes(v)
+    if videoslist:
+        print(f"start extracting frames {startframe}-{endframe} from videos")
+        for v in tqdm.tqdm(videoslist):
+            extractframes(v, startframe, endframe)
+    else:
+        print("no videos found, assuming images are already extracted in cam*/ folders")
 
-    
-
-    # # ## step2 prepare colmap input 
+    # # ## step2 prepare colmap input
     print("start preparing colmap image input")
     for offset in range(startframe, endframe):
         preparecolmapdynerf(videopath, offset)
