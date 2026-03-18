@@ -46,18 +46,6 @@ def loadCam(args, id, cam_info, resolution_scale):
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
 
-    if resized_image_rgb.shape[0] == 4:
-        # image was saved as RGBA — use 4th channel directly
-        loaded_mask = resized_image_rgb[3:4, ...]
-    elif cam_info.image_path is not None:
-        # look for a paired greyscale mask file: cam_XXX_mask.png
-        mask_path = cam_info.image_path.replace(".png", "_mask.png")
-        if os.path.exists(mask_path):
-            from PIL import Image as PILImage
-            import torchvision.transforms.functional as TF
-            mask_pil = PILImage.open(mask_path).convert("L").resize(resolution, PILImage.NEAREST)
-            loaded_mask = TF.to_tensor(mask_pil)  # [1, H, W] in [0, 1]
-
     cameradirect = cam_info.hpdirecitons
     camerapose = cam_info.pose
 

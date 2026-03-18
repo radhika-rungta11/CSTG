@@ -394,19 +394,34 @@ def getcolmapsinglecustom(folder, offset):
     if not os.path.exists(distortedmodel):
         os.makedirs(distortedmodel)
 
-    featureextract = "colmap feature_extractor --database_path " + dbfile + " --image_path " + inputimagefolder
+    featureextract = ("colmap feature_extractor --database_path " + dbfile + " --image_path " + inputimagefolder
+        + " --ImageReader.single_camera 1"
+        + " --ImageReader.camera_model PINHOLE"
+        + " --SiftExtraction.max_num_features 16384"
+        + " --SiftExtraction.peak_threshold 0.001"
+        + " --SiftExtraction.edge_threshold 20")
     exit_code = os.system(featureextract)
     if exit_code != 0:
         exit(exit_code)
 
-    featurematcher = "colmap exhaustive_matcher --database_path " + dbfile
+    featurematcher = ("colmap exhaustive_matcher --database_path " + dbfile)
     exit_code = os.system(featurematcher)
     if exit_code != 0:
         exit(exit_code)
 
     # mapper estimates poses from scratch (no prior model needed)
-    mapper = "colmap mapper --database_path " + dbfile + " --image_path " + inputimagefolder \
-        + " --output_path " + distortedmodel + " --Mapper.ba_global_function_tolerance=0.000001"
+    mapper = ("colmap mapper --database_path " + dbfile + " --image_path " + inputimagefolder
+        + " --output_path " + distortedmodel
+        + " --Mapper.ba_global_function_tolerance=0.000001"
+        + " --Mapper.init_min_tri_angle 2"
+        + " --Mapper.multiple_models 0"
+        + " --Mapper.abs_pose_min_num_inliers 10"
+        + " --Mapper.abs_pose_min_inlier_ratio 0.05"
+        + " --Mapper.filter_min_tri_angle 0.5"
+        + " --Mapper.tri_min_angle 0.5"
+        + " --Mapper.filter_max_reproj_error 8"
+        + " --Mapper.ba_refine_focal_length 0"
+        + " --Mapper.ba_refine_extra_params 0")
     exit_code = os.system(mapper)
     if exit_code != 0:
         exit(exit_code)
@@ -441,3 +456,90 @@ def getcolmapsinglecustom(folder, offset):
         source_file = os.path.join(folder, "sparse", file)
         destination_file = os.path.join(folder, "sparse", "0", file)
         shutil.move(source_file, destination_file)
+
+
+def triangulateperframe(basefolder, offset):
+    """Triangulate a per-frame point cloud for frame `offset` using camera poses
+    from colmap_0 (static rig). Gives each frame its own points3D.bin with
+    geometry specific to that time step, which the training merges with timestamps.
+
+    Requires colmap_0 to already be processed by getcolmapsinglecustom.
+    """
+    colmap0_sparse = os.path.join(basefolder, "colmap_0", "sparse", "0")
+    folder = os.path.join(basefolder, "colmap_" + str(offset))
+    images_dir = os.path.join(folder, "images")
+    input_dir = os.path.join(folder, "input")
+    manual_dir = os.path.join(folder, "manual")
+    tri_out = os.path.join(folder, "distorted", "sparse")
+    sparse_dst = os.path.join(folder, "sparse", "0")
+    dbfile = os.path.join(folder, "input.db")
+
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(manual_dir, exist_ok=True)
+    os.makedirs(tri_out, exist_ok=True)
+    os.makedirs(sparse_dst, exist_ok=True)
+
+    # Export colmap_0 poses to text format for use as known poses
+    cmd = ("colmap model_converter"
+           " --input_path " + colmap0_sparse +
+           " --output_path " + manual_dir +
+           " --output_type TXT")
+    exit_code = os.system(cmd)
+    if exit_code != 0:
+        exit(exit_code)
+
+    # Copy undistorted images to input/ for feature extraction
+    for img in sorted(os.listdir(images_dir)):
+        if not img.endswith(".png"):
+            continue
+        src = os.path.join(images_dir, img)
+        dst = os.path.join(input_dir, img)
+        if not os.path.exists(dst):
+            shutil.copy(src, dst)
+
+    # Remove stale DB
+    if os.path.exists(dbfile):
+        os.remove(dbfile)
+
+    # Feature extraction
+    cmd = ("colmap feature_extractor"
+           " --database_path " + dbfile +
+           " --image_path " + input_dir +
+           " --ImageReader.single_camera 1"
+           " --ImageReader.camera_model PINHOLE"
+           " --SiftExtraction.max_num_features 16384"
+           " --SiftExtraction.peak_threshold 0.001"
+           " --SiftExtraction.edge_threshold 20")
+    exit_code = os.system(cmd)
+    if exit_code != 0:
+        exit(exit_code)
+
+    # Feature matching
+    cmd = "colmap exhaustive_matcher --database_path " + dbfile
+    exit_code = os.system(cmd)
+    if exit_code != 0:
+        exit(exit_code)
+
+    # Triangulate using known poses from colmap_0
+    cmd = ("colmap point_triangulator"
+           " --database_path " + dbfile +
+           " --image_path " + input_dir +
+           " --output_path " + tri_out +
+           " --input_path " + manual_dir +
+           " --Mapper.ba_global_function_tolerance=0.000001")
+    exit_code = os.system(cmd)
+    if exit_code != 0:
+        exit(exit_code)
+
+    # Copy resulting points3D.bin to sparse/0/
+    src = os.path.join(tri_out, "points3D.bin")
+    dst = os.path.join(sparse_dst, "points3D.bin")
+    if os.path.exists(src):
+        if os.path.exists(dst) or os.path.islink(dst):
+            os.remove(dst)
+        shutil.copy(src, dst)
+    else:
+        print(f"warning: triangulation produced no points3D.bin for frame {offset}")
+
+    # Cleanup input images
+    shutil.rmtree(input_dir, ignore_errors=True)

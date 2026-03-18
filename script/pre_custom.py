@@ -33,18 +33,17 @@
 import os
 import glob
 import tqdm
-import shutil
 import sys
 import argparse
 import numpy as np
 import cv2
 
 sys.path.append(".")
-from thirdparty.gaussian_splatting.helper3dg import getcolmapsinglecustom
+from thirdparty.gaussian_splatting.helper3dg import getcolmapsinglecustom, triangulateperframe
 
 
 def convertimage(imagepath):
-    """Read and convert to 8-bit RGB. Alpha is saved separately as _mask.png."""
+    """Read and convert to 8-bit RGB. COLMAP requires 8-bit RGB input."""
     img = cv2.imread(imagepath, cv2.IMREAD_UNCHANGED)
     if img is None:
         return None
@@ -55,26 +54,8 @@ def convertimage(imagepath):
     return img
 
 
-def extractalpha(imagepath, target_hw=None):
-    """Extract 8-bit alpha mask from an RGBA source image.
-    Resizes to target_hw=(H, W) if given. Returns None if no alpha channel.
-    """
-    src = cv2.imread(imagepath, cv2.IMREAD_UNCHANGED)
-    if src is None or src.ndim < 3 or src.shape[2] < 4:
-        return None
-    if src.dtype == np.uint16:
-        src = (src / 256).astype(np.uint8)
-    alpha = src[:, :, 3]
-    if target_hw is not None and alpha.shape[:2] != tuple(target_hw):
-        alpha = cv2.resize(alpha, (target_hw[1], target_hw[0]),
-                           interpolation=cv2.INTER_NEAREST)
-    return alpha
-
-
 def preparecolmapframes(folder, offset=0):
-    """Copy one frame per camera into colmap_<offset>/input/ for COLMAP.
-    Converts 16-bit RGBA to 8-bit RGB (COLMAP requires 8-bit RGB input).
-    """
+    """Copy one frame per camera into colmap_<offset>/input/ for COLMAP."""
     folderlist = sorted(glob.glob(os.path.join(folder, "cam_*/")))
     savedir = os.path.join(folder, "colmap_" + str(offset), "input")
     os.makedirs(savedir, exist_ok=True)
@@ -91,35 +72,9 @@ def preparecolmapframes(folder, offset=0):
                 cv2.imwrite(imagesavepath, img)
 
 
-def applysourcealpha(folder, offset):
-    """Save a greyscale _mask.png alongside each image in colmap_<offset>/images/.
-    COLMAP's image_undistorter strips alpha; this recovers it from the source
-    RGBA frames. loadCam detects the paired file and uses it as a foreground mask
-    so background pixels contribute zero loss during training.
-    """
-    folderlist = sorted(glob.glob(os.path.join(folder, "cam_*/")))
-    savedir = os.path.join(folder, "colmap_" + str(offset), "images")
-    for camfolder in folderlist:
-        camname = os.path.basename(camfolder.rstrip("/"))
-        srcpath = os.path.join(camfolder, str(offset).zfill(5) + ".png")
-        dstpath = os.path.join(savedir, camname + ".png")
-        maskpath = os.path.join(savedir, camname + "_mask.png")
-        if not os.path.exists(srcpath) or not os.path.exists(dstpath):
-            continue
-        if os.path.exists(maskpath):
-            continue
-        ref = cv2.imread(dstpath, cv2.IMREAD_COLOR)
-        if ref is None:
-            continue
-        alpha = extractalpha(srcpath, target_hw=ref.shape[:2])
-        if alpha is not None:
-            cv2.imwrite(maskpath, alpha)
-
-
 def prepareimagesonly(folder, offset):
-    """For frames after frame 0: place RGB images + _mask.png in colmap_<offset>/images/.
+    """For frames after frame 0: place RGB images in colmap_<offset>/images/.
     Camera poses come from colmap_0 (static rig), so no COLMAP needed.
-    Symlinks points3D.bin from colmap_0 for scene initialisation.
     """
     folderlist = sorted(glob.glob(os.path.join(folder, "cam_*/")))
     savedir = os.path.join(folder, "colmap_" + str(offset), "images")
@@ -135,37 +90,21 @@ def prepareimagesonly(folder, offset):
             continue
 
         imagesavepath = os.path.join(savedir, camname + ".png")
-        maskpath = os.path.join(savedir, camname + "_mask.png")
 
-        # Determine target size from colmap_0 undistorted image
-        ref_path = os.path.join(ref_images_dir, camname + ".png")
+        # Match size of colmap_0 undistorted image
         target_hw = None
+        ref_path = os.path.join(ref_images_dir, camname + ".png")
         if os.path.exists(ref_path):
             ref = cv2.imread(ref_path, cv2.IMREAD_COLOR)
             if ref is not None:
                 target_hw = ref.shape[:2]  # (H, W)
 
-        # Save RGB image
         if not os.path.exists(imagesavepath):
             img = convertimage(imagepath)
             if img is not None:
                 if target_hw is not None:
                     img = cv2.resize(img, (target_hw[1], target_hw[0]))
                 cv2.imwrite(imagesavepath, img)
-
-        # Save alpha mask
-        if not os.path.exists(maskpath):
-            alpha = extractalpha(imagepath, target_hw=target_hw)
-            if alpha is not None:
-                cv2.imwrite(maskpath, alpha)
-
-    # Symlink points3D.bin from colmap_0 for scene initialisation
-    sparse_dst = os.path.join(folder, "colmap_" + str(offset), "sparse", "0")
-    os.makedirs(sparse_dst, exist_ok=True)
-    src = os.path.abspath(os.path.join(folder, "colmap_0", "sparse", "0", "points3D.bin"))
-    dst = os.path.join(sparse_dst, "points3D.bin")
-    if os.path.exists(src) and not os.path.exists(dst):
-        os.symlink(src, dst)
 
 
 if __name__ == "__main__":
@@ -199,12 +138,13 @@ if __name__ == "__main__":
         preparecolmapframes(videopath, 0)
         print("running full COLMAP SfM for frame 0 (feature extraction, matching, mapper, undistortion)")
         getcolmapsinglecustom(videopath, 0)
-        print("saving alpha masks for frame 0")
-        applysourcealpha(videopath, 0)
 
-    # Frames 1+: static rig, just place images and masks — no COLMAP needed
+    # Frames 1+: place images, then triangulate per-frame point cloud
     remaining = range(max(startframe, 1), endframe)
     if remaining:
-        print(f"preparing frames {remaining.start}–{remaining.stop - 1}")
+        print(f"preparing images for frames {remaining.start}–{remaining.stop - 1}")
         for offset in tqdm.tqdm(remaining):
             prepareimagesonly(videopath, offset)
+        print(f"triangulating per-frame point clouds for frames {remaining.start}–{remaining.stop - 1}")
+        for offset in tqdm.tqdm(remaining):
+            triangulateperframe(videopath, offset)

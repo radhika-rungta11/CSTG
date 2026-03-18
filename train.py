@@ -181,10 +181,6 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                 image, viewspace_point_tensor, visibility_filter, radii = getrenderparts(render_pkg)
                 gt_image = viewpoint_cam.original_image.float().cuda()
 
-                # Apply foreground mask to rendered image so background pixels
-                # contribute zero loss (gt_image is already masked by Camera class)
-                if getattr(viewpoint_cam, 'gt_alpha_mask', None) is not None:
-                    image = image * viewpoint_cam.gt_alpha_mask.float()
 
                 if opt.reg == 2:
                     Ll1 = l2_loss(image, gt_image)
