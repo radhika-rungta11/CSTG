@@ -223,6 +223,8 @@ if __name__ == "__main__":
     parser.add_argument("--endframe", default=37, type=int)
     parser.add_argument("--regen-images", action="store_true",
                         help="Re-composite training images over white bg without re-running COLMAP")
+    parser.add_argument("--masks-only", action="store_true",
+                        help="Only generate training masks for all frames, no COLMAP re-run")
 
     args = parser.parse_args()
     videopath = args.videopath
@@ -238,6 +240,12 @@ if __name__ == "__main__":
 
     if not videopath.endswith("/"):
         videopath = videopath + "/"
+
+    if args.masks_only:
+        print(f"Saving masks for frames {startframe}..{endframe-1}")
+        for offset in tqdm.tqdm(range(startframe, endframe)):
+            savemasks(videopath, offset)
+        quit()
 
     if args.regen_images:
         print(f"Re-compositing {endframe - startframe} frame(s) over white background (no COLMAP re-run)")

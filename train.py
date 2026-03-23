@@ -88,8 +88,9 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
     gaussians.training_setup(opt)
     
-    numchannel = 9 
+    numchannel = 9
 
+    random_background = getattr(dataset, 'random_background', False)
     bg_color = [1, 1, 1] if dataset.white_background else [0 for i in range(numchannel)]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -177,9 +178,20 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
             for i in range(opt.batch):
                 viewpoint_cam = camindex[i]
+
+                if random_background:
+                    rand_rgb = torch.rand(3, device="cuda")
+                    background = torch.cat([rand_rgb, torch.zeros(numchannel - 3, device="cuda")])
+
                 render_pkg = render(viewpoint_cam, gaussians, pipe, background,  override_color=None,  basicfunction=rbfbasefunction, GRsetting=GRsetting, GRzer=GRzer, rvq_iter=(iteration > opt.rvq_iter))
                 image, viewspace_point_tensor, visibility_filter, radii = getrenderparts(render_pkg)
                 gt_image = viewpoint_cam.original_image.float().cuda()
+
+                if random_background:
+                    gt_alpha = viewpoint_cam.gt_alpha_mask
+                    if gt_alpha is not None:
+                        rand_rgb_3d = background[:3].view(3, 1, 1)
+                        gt_image = gt_image * gt_alpha.cuda() + rand_rgb_3d * (1.0 - gt_alpha.cuda())
 
 
                 if opt.reg == 2:
