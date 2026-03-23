@@ -508,6 +508,7 @@ class GaussianModel:
         return torch.nn.Parameter(out), quant, torch.tensor([min_val, max_val])
     
     def huffman_encode(self, param):
+        param = torch.nan_to_num(param, nan=0.0)
         input_code_list = param.view(-1).tolist()
         unique, counts = np.unique(input_code_list, return_counts=True)
         num_freq = dict(zip(unique, counts))

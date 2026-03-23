@@ -141,6 +141,14 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, near, far, 
             assert os.path.exists(image_path), "Image {} does not exist!".format(image_path)
             image = Image.open(image_path)
             image.load()  # force-read so PIL closes the file descriptor
+            # Attach alpha mask as 4th channel if available (for masked training loss)
+            mask_path = image_path.replace("/images/", "/masks/")
+            if os.path.exists(mask_path):
+                mask_pil = Image.open(mask_path).convert("L")
+                mask_pil.load()
+                rgb = image.convert("RGB")
+                r, g, b = rgb.split()
+                image = Image.merge("RGBA", (r, g, b, mask_pil))
             if j == startime:
                 # cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path, image_name=image_name, width=width, height=height, near=near, far=far, timestamp=(j-startime)/duration, pose=hpposes[sortednamedict[os.path.basename(extr.name)]], hpdirecitons=hpdirecitons,cxr=0.0, cyr=0.0)
                 cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path, image_name=image_name, width=width, height=height, near=near, far=far, timestamp=(j-startime)/duration, pose=1, hpdirecitons=1,cxr=0.0, cyr=0.0)

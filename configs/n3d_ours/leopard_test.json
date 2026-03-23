@@ -1,5 +1,5 @@
 {
-  "resolution": 2,
+  "resolution": 1,
   "model": "ours",
   "loader": "colmap",
   "white_background": false,

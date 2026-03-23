@@ -394,12 +394,14 @@ def getcolmapsinglecustom(folder, offset):
     if not os.path.exists(distortedmodel):
         os.makedirs(distortedmodel)
 
+    maskfolder = os.path.join(folder, "input_masks")
     featureextract = ("colmap feature_extractor --database_path " + dbfile + " --image_path " + inputimagefolder
         + " --ImageReader.single_camera 1"
         + " --ImageReader.camera_model PINHOLE"
         + " --SiftExtraction.max_num_features 16384"
         + " --SiftExtraction.peak_threshold 0.001"
-        + " --SiftExtraction.edge_threshold 20")
+        + " --SiftExtraction.edge_threshold 20"
+        + (" --ImageReader.mask_path " + maskfolder if (os.path.exists(maskfolder) and os.listdir(maskfolder)) else ""))
     exit_code = os.system(featureextract)
     if exit_code != 0:
         exit(exit_code)
@@ -469,6 +471,7 @@ def triangulateperframe(basefolder, offset):
     folder = os.path.join(basefolder, "colmap_" + str(offset))
     images_dir = os.path.join(folder, "images")
     input_dir = os.path.join(folder, "input")
+    mask_dir = os.path.join(folder, "input_masks")
     manual_dir = os.path.join(folder, "manual")
     tri_out = os.path.join(folder, "distorted", "sparse")
     sparse_dst = os.path.join(folder, "sparse", "0")
@@ -509,7 +512,8 @@ def triangulateperframe(basefolder, offset):
            " --ImageReader.camera_model PINHOLE"
            " --SiftExtraction.max_num_features 16384"
            " --SiftExtraction.peak_threshold 0.001"
-           " --SiftExtraction.edge_threshold 20")
+           " --SiftExtraction.edge_threshold 20"
+           + (" --ImageReader.mask_path " + mask_dir if (os.path.exists(mask_dir) and os.listdir(mask_dir)) else ""))
     exit_code = os.system(cmd)
     if exit_code != 0:
         exit(exit_code)

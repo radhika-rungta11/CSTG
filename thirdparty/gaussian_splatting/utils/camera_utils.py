@@ -45,6 +45,8 @@ def loadCam(args, id, cam_info, resolution_scale):
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
+    if resized_image_rgb.shape[0] == 4:
+        loaded_mask = resized_image_rgb[3:4, ...]
 
     cameradirect = cam_info.hpdirecitons
     camerapose = cam_info.pose
