@@ -7,8 +7,8 @@
   "scaling_lr": 0.0015,
   "preprocesspoints": 0,
   "densify": 3,
-  "desicnt": 40,
-  "densify_until_iter": 1000,
+  "desicnt": 20,
+  "densify_grad_threshold": 0.0001,
   "iterations": 2000,
   "duration": 6,
   "rdpip": "train_ours_full",
@@ -23,6 +23,5 @@
   "mask_lr": 0.01,
   "net_lr": 0.001,
   "net_lr_step": [300, 600, 900, 1200, 1600, 1800],
-  "lambda_mask": 0.0005,
-  "densify_grad_threshold": 0.0001
+  "lambda_mask": 0.0005
 }

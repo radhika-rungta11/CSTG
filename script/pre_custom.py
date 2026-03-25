@@ -37,9 +37,13 @@ import sys
 import argparse
 import numpy as np
 import cv2
+import re
+import shutil
+import sqlite3
 
 sys.path.append(".")
 from thirdparty.gaussian_splatting.helper3dg import getcolmapsinglecustom, triangulateperframe
+from thirdparty.gaussian_splatting.utils.my_utils import posetow2c_matrcs, rotmat2qvec
 
 
 def convertimage(imagepath, white_background=True):
@@ -105,6 +109,40 @@ def savemasks(folder, offset):
         mask = extractforegroundmask(srcpath, target_hw=target_hw)
         if mask is not None:
             cv2.imwrite(masksavepath, mask)
+
+
+def extractvideos(folder, startframe, endframe):
+    """Extract frames from cam*.mp4 files into cam_XXX/YYYYY.png structure.
+    cam00.mp4 -> cam_000/, cam01.mp4 -> cam_001/, etc.
+    Skips files that already exist.
+    """
+    mp4s = sorted(glob.glob(os.path.join(folder, "cam*.mp4")))
+    if not mp4s:
+        print("no cam*.mp4 files found, skipping extraction")
+        return
+    print(f"extracting frames {startframe}..{endframe-1} from {len(mp4s)} video(s)")
+    for mp4path in tqdm.tqdm(mp4s):
+        basename = os.path.splitext(os.path.basename(mp4path))[0]  # e.g. "cam00"
+        digits = re.sub(r"[^0-9]", "", basename)
+        camname = "cam_" + digits.zfill(3)                         # e.g. "cam_000"
+        outdir = os.path.join(folder, camname)
+        os.makedirs(outdir, exist_ok=True)
+        cap = cv2.VideoCapture(mp4path)
+        fidx = 0
+        extracted = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if startframe <= fidx < endframe:
+                outpath = os.path.join(outdir, str(fidx).zfill(5) + ".png")
+                if not os.path.exists(outpath):
+                    cv2.imwrite(outpath, frame)
+                extracted += 1
+            elif fidx >= endframe:
+                break
+            fidx += 1
+        cap.release()
 
 
 def preparecolmapframes(folder, offset=0):
@@ -216,6 +254,126 @@ def regeneratetrainimages(folder, startframe, endframe):
         savemasks(folder, offset)
 
 
+def colmapfromposesbounds(folder, offset):
+    """Run COLMAP for one frame using ground-truth poses/intrinsics from poses_bounds.npy.
+
+    COLMAP 3.x compatible: feature_extractor runs first on a fresh DB (so it creates
+    the new rigs/frames schema), then the DB is patched with known calibration from
+    poses_bounds.npy before triangulation. Avoids the duplicate-camera crash caused
+    by pre-populating the DB before feature extraction.
+    """
+    posespath = os.path.join(folder, "poses_bounds.npy")
+    poses_bounds = np.load(posespath)
+    poses = poses_bounds[:, :15].reshape(-1, 3, 5)
+    llffposes = poses.copy().transpose(1, 2, 0)
+    w2c_matriclist = posetow2c_matrcs(llffposes)
+
+    projectfolder = os.path.join(folder, "colmap_" + str(offset))
+    dbfile = os.path.join(projectfolder, "input.db")
+    inputimagefolder = os.path.join(projectfolder, "input")
+    distortedmodel = os.path.join(projectfolder, "distorted/sparse")
+    manualfolder = os.path.join(projectfolder, "manual")
+
+    os.makedirs(distortedmodel, exist_ok=True)
+    os.makedirs(manualfolder, exist_ok=True)
+
+    # Delete any existing DB so COLMAP creates a fresh 3.x-compatible schema
+    if os.path.exists(dbfile):
+        os.remove(dbfile)
+
+    # Step 1: feature extraction (creates DB with correct rig/frame tables)
+    exit_code = os.system(
+        "colmap feature_extractor --database_path " + dbfile +
+        " --image_path " + inputimagefolder)
+    if exit_code != 0:
+        exit(exit_code)
+
+    # Step 2: patch DB with ground-truth poses and intrinsics from poses_bounds.npy.
+    # Match by position: images sorted alphabetically map to poses_bounds in cam-source order.
+    # This is robust regardless of naming convention (cam00 vs cam_000 etc.).
+    db = sqlite3.connect(dbfile)
+    rows = db.execute(
+        "SELECT image_id, name, camera_id FROM images ORDER BY name").fetchall()
+
+    if len(rows) != len(poses):
+        print(f"WARNING: DB has {len(rows)} images but poses_bounds has {len(poses)} cameras — "
+              "results may be incorrect")
+
+    imagetxtlist = []
+    cameratxtlist = []
+
+    for idx, (image_id, imgname, camera_id) in enumerate(rows):
+        if idx >= len(poses):
+            print(f"WARNING: more images than poses, skipping {imgname}")
+            continue
+        m = w2c_matriclist[idx]
+        colmapR = m[:3, :3]
+        T = m[:3, 3]
+        H, W, focal = poses[idx, :, -1]
+        colmapQ = rotmat2qvec(colmapR)
+
+        params = np.array([focal, focal, W / 2.0, H / 2.0], dtype=np.float64)
+        db.execute(
+            "UPDATE cameras SET model=1, width=?, height=?, params=?, prior_focal_length=1 "
+            "WHERE camera_id=?",
+            (int(W), int(H), params.tobytes(), camera_id))
+
+        imagetxtlist.append(
+            str(image_id) + " " +
+            " ".join(str(colmapQ[j]) for j in range(4)) + " " +
+            " ".join(str(T[j]) for j in range(3)) + " " +
+            str(camera_id) + " " + imgname + "\n\n")
+        cameratxtlist.append(
+            str(camera_id) + " PINHOLE " + str(int(W)) + " " + str(int(H)) + " " +
+            str(focal) + " " + str(focal) + " " +
+            str(W / 2.0) + " " + str(H / 2.0) + "\n")
+
+    db.commit()
+    db.close()
+
+    with open(os.path.join(manualfolder, "images.txt"), "w") as f:
+        f.writelines(imagetxtlist)
+    with open(os.path.join(manualfolder, "cameras.txt"), "w") as f:
+        f.writelines(cameratxtlist)
+    open(os.path.join(manualfolder, "points3D.txt"), "w").close()
+
+    # Step 3: feature matching
+    exit_code = os.system(
+        "colmap exhaustive_matcher --database_path " + dbfile)
+    if exit_code != 0:
+        exit(exit_code)
+
+    # Step 4: triangulate with known poses
+    exit_code = os.system(
+        "colmap point_triangulator --database_path " + dbfile +
+        " --image_path " + inputimagefolder +
+        " --output_path " + distortedmodel +
+        " --input_path " + manualfolder +
+        " --Mapper.ba_global_function_tolerance=0.000001")
+    if exit_code != 0:
+        exit(exit_code)
+
+    # Step 5: undistort images
+    exit_code = os.system(
+        "colmap image_undistorter --image_path " + inputimagefolder +
+        " --input_path " + distortedmodel +
+        " --output_path " + projectfolder +
+        " --output_type COLMAP")
+    if exit_code != 0:
+        exit(exit_code)
+
+    os.system("rm -r " + inputimagefolder)
+
+    # Move sparse files into sparse/0/
+    sparsetop = os.path.join(projectfolder, "sparse")
+    os.makedirs(os.path.join(sparsetop, "0"), exist_ok=True)
+    for fname in os.listdir(sparsetop):
+        if fname == "0":
+            continue
+        shutil.move(os.path.join(sparsetop, fname),
+                    os.path.join(sparsetop, "0", fname))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--videopath", default="", type=str)
@@ -225,6 +383,8 @@ if __name__ == "__main__":
                         help="Re-composite training images over white bg without re-running COLMAP")
     parser.add_argument("--masks-only", action="store_true",
                         help="Only generate training masks for all frames, no COLMAP re-run")
+    parser.add_argument("--extract-videos", action="store_true",
+                        help="Extract frames from cam*.mp4 into cam_XXX/YYYYY.png before processing")
 
     args = parser.parse_args()
     videopath = args.videopath
@@ -240,6 +400,9 @@ if __name__ == "__main__":
 
     if not videopath.endswith("/"):
         videopath = videopath + "/"
+
+    if args.extract_videos:
+        extractvideos(videopath, startframe, endframe)
 
     if args.masks_only:
         print(f"Saving masks for frames {startframe}..{endframe-1}")
@@ -257,12 +420,22 @@ if __name__ == "__main__":
     print(f"Preparing {duration} frame(s) [{startframe}..{endframe-1}]")
     print(f"  → set \"duration\": {duration} in your training config")
 
-    # Frame 0: full COLMAP SfM to recover camera poses
+    use_poses_bounds = os.path.exists(os.path.join(videopath, "poses_bounds.npy"))
+    if use_poses_bounds:
+        print("found poses_bounds.npy — using ground-truth calibration (N3D-style pipeline)")
+    else:
+        print("no poses_bounds.npy — running full COLMAP SfM")
+
+    # Frame 0: recover camera poses
     if startframe == 0:
         print("preparing colmap input for frame 0")
         preparecolmapframes(videopath, 0)
-        print("running full COLMAP SfM for frame 0 (feature extraction, matching, mapper, undistortion)")
-        getcolmapsinglecustom(videopath, 0)
+        if use_poses_bounds:
+            print("running feature extraction + known-pose triangulation for frame 0")
+            colmapfromposesbounds(videopath, 0)
+        else:
+            print("running full COLMAP SfM for frame 0 (feature extraction, matching, mapper, undistortion)")
+            getcolmapsinglecustom(videopath, 0)
         print("saving training masks for frame 0")
         savemasks(videopath, 0)
 

@@ -124,9 +124,11 @@ def freezweightsbymask(model, screenlist, mask):
 def freezweightsbymasknounsqueeze(model, screenlist, mask):
     for k in screenlist:
         grad_tensor = getattr(getattr(model, k), 'grad')
+        if grad_tensor is None:
+            continue
         newgrad =  mask*grad_tensor #torch.zeros_like(grad_tensor)
         setattr(getattr(model, k), 'grad', newgrad)
-    return  
+    return
 
 
 def removeminmax(gaussians, maxbounds, minbounds):
@@ -146,13 +148,17 @@ def removeminmax(gaussians, maxbounds, minbounds):
 
 
 def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filter, radii, viewspace_point_tensor, flag, traincamerawithdistance=None, maxbounds=None, minbounds=None): 
-    if densify == 1: # n3d 
+    if densify == 1: # n3d
         if iteration < opt.densify_until_iter :
             if iteration ==  8001 : # 8001
                 omegamask = gaussians.zero_omegabymotion() # 1 we keep omega, 0 we freeze omega
                 gaussians.omegamask  = omegamask
                 scene.recordpoints(iteration, "seperate omega"+str(torch.sum(omegamask).item()))
             elif iteration > 8001: # 8001
+                if gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
+                    omegamask = gaussians.zero_omegabymotion()
+                    gaussians.omegamask = omegamask
+                    scene.recordpoints(iteration, "seperate omega"+str(torch.sum(omegamask).item()))
                 freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
                 rotationmask = torch.logical_not(gaussians.omegamask)
                 freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask)
@@ -193,6 +199,10 @@ def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filt
                 gaussians.omegamask  = omegamask
                 scene.recordpoints(iteration, "seperate omega"+str(torch.sum(omegamask).item()))
             elif iteration > 8001: # 8001
+                if gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
+                    omegamask = gaussians.zero_omegabymotion()
+                    gaussians.omegamask = omegamask
+                    scene.recordpoints(iteration, "seperate omega"+str(torch.sum(omegamask).item()))
                 freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
                 rotationmask = torch.logical_not(gaussians.omegamask)
                 freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask)
@@ -212,8 +222,8 @@ def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filt
                 gaussians.reset_opacity()
         else:
             if iteration % 1000 == 500 :
-                zmask = gaussians._xyz[:,2] < 4.5  # for stability  
-                gaussians.prune_points(zmask) 
+                zmask = gaussians._xyz[:,2] < 4.5  # for stability
+                gaussians.prune_points(zmask)
                 torch.cuda.empty_cache()
         return flag
     
@@ -231,7 +241,7 @@ def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filt
                     flag+=1
                     scene.recordpoints(iteration, "after densify")
                 else:
-                    if iteration < 7000 : # defalt 7000. 
+                    if iteration < 7000 : # defalt 7000.
                         prune_mask =  (gaussians.get_opacity < opt.opthr).squeeze()
                         gaussians.prune_points(prune_mask)
                         torch.cuda.empty_cache()
@@ -239,7 +249,14 @@ def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filt
             if iteration % opt.opacity_reset_interval == 0 :
                 gaussians.reset_opacity()
         else:
-            if iteration == 10000: 
+            if gaussians.omegamask is None or gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
+                omegamask = gaussians.zero_omegabymotion()
+                gaussians.omegamask = omegamask
+                scene.recordpoints(iteration, "seperate omega" + str(torch.sum(omegamask).item()))
+            freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
+            rotationmask = torch.logical_not(gaussians.omegamask)
+            freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask)
+            if iteration == 10000:
                 removeminmax(gaussians, maxbounds, minbounds)
         return flag
     

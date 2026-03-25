@@ -190,9 +190,9 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                 if random_background:
                     gt_alpha = viewpoint_cam.gt_alpha_mask
                     if gt_alpha is not None:
+                        gt_alpha_cuda = gt_alpha.cuda()
                         rand_rgb_3d = background[:3].view(3, 1, 1)
-                        gt_image = gt_image * gt_alpha.cuda() + rand_rgb_3d * (1.0 - gt_alpha.cuda())
-
+                        gt_image = gt_image * gt_alpha_cuda + rand_rgb_3d * (1.0 - gt_alpha_cuda)
 
                 if opt.reg == 2:
                     Ll1 = l2_loss(image, gt_image)
@@ -246,7 +246,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Gaussians": gaussians.get_xyz.shape[0]})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()

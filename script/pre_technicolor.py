@@ -20,27 +20,24 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import os 
-import cv2 
-import glob 
-import tqdm 
-import numpy as np 
+import os
+import cv2
+import glob
+import tqdm
+import numpy as np
 import shutil
 import pickle
+import sqlite3
 
-import natsort 
+import natsort
 import struct
 import pickle
 import csv
-import sys 
+import sys
 import argparse
 from PIL import Image
 
 sys.path.append(".")
-
-
-from thirdparty.colmap.pre_colmap import * 
-from thirdparty.gaussian_splatting.helper3dg import getcolmapsingletechni
 
 
 
@@ -48,87 +45,121 @@ from thirdparty.gaussian_splatting.helper3dg import getcolmapsingletechni
     
 
 
-def convertmodel2dbfiles(path, offset=0):
-    projectfolder = os.path.join(path, "colmap_" + str(offset))
-    manualfolder = os.path.join(projectfolder, "manual")
+def updatetechnicamerasindb(dbfile, videopath, manualfolder):
+    """After feature_extractor, update cameras with Technicolor intrinsics and write manual/ files.
+    Uses positional matching: DB images sorted by name map 1-to-1 to cameras_parameters.txt rows."""
+    camparam_path = os.path.join(videopath, "cameras_parameters.txt")
+    camparams = []
+    with open(camparam_path, "r") as f:
+        reader = csv.reader(f, delimiter=" ")
+        for lineidx, row in enumerate(reader):
+            if lineidx == 0:
+                continue  # skip header line
+            row = [float(c) for c in row if c.strip() != '']
+            camparams.append(row)
 
+    con = sqlite3.connect(dbfile)
+    rows = con.execute("SELECT image_id, name, camera_id FROM images ORDER BY name").fetchall()
 
-    if not os.path.exists(manualfolder):
-        os.makedirs(manualfolder)
-
-    savetxt = os.path.join(manualfolder, "images.txt")
-    savecamera = os.path.join(manualfolder, "cameras.txt")
-    savepoints = os.path.join(manualfolder, "points3D.txt")
     imagetxtlist = []
     cameratxtlist = []
-    if os.path.exists(os.path.join(projectfolder, "input.db")):
-        os.remove(os.path.join(projectfolder, "input.db"))
+    W, H = 2048, 1088
 
-    db = COLMAPDatabase.connect(os.path.join(projectfolder, "input.db"))
+    for db_idx, (image_id, imgname, camera_id) in enumerate(rows):
+        if db_idx >= len(camparams):
+            print(f"WARNING: no camera param entry for DB image idx {db_idx} ({imgname}), skipping")
+            continue
+        p = camparams[db_idx]
+        fx = p[0]
+        cx = p[1]
+        cy = p[2]
+        colmapQ = [p[5], p[6], p[7], p[8]]  # qw qx qy qz
+        colmapT = [p[9], p[10], p[11]]
 
-    db.create_tables()
+        params = np.array([fx, fx, cx, cy], dtype=np.float64)
+        con.execute(
+            "UPDATE cameras SET model=1, width=?, height=?, params=?, prior_focal_length=1 WHERE camera_id=?",
+            (W, H, params.tobytes(), camera_id)
+        )
 
+        line = (str(image_id) + " " +
+                " ".join(str(v) for v in colmapQ) + " " +
+                " ".join(str(v) for v in colmapT) + " " +
+                str(camera_id) + " " + imgname + "\n")
+        imagetxtlist.append(line)
+        imagetxtlist.append("\n")
+        cameratxtlist.append(
+            f"{camera_id} PINHOLE {W} {H} {fx} {fx} {cx} {cy}\n"
+        )
 
+    con.commit()
+    con.close()
 
-    with open(os.path.join(path, "cameras_parameters.txt"), "r") as f:
-            reader = csv.reader(f, delimiter=" ")
-            for idx, row in enumerate(reader):
-                if idx == 0:
-                    continue
-                idx = idx - 1
-                row = [float(c) for c in row if c.strip() != '']
-                fx = row[0]  
-                fy = row[0]  
-
-                cx = row[1]  
-                cy = row[2]  
-
-                colmapQ = [row[5], row[6], row[7], row[8]] 
-                colmapT = [row[9], row[10], row[11]]  
-                cameraname = "cam" + str(idx).zfill(2)
-                focolength = fx
-
-                principlepoint =[0,0]
-                principlepoint[0] = cx 
-                principlepoint[1] = cy  
-                 
-                imageid = str(idx+1)
-                cameraid = imageid
-                pngname = cameraname + ".png"
-
-                line =  imageid + " "
-
-                for j in range(4):
-                    line += str(colmapQ[j]) + " "
-                for j in range(3):
-                    line += str(colmapT[j]) + " "
-                line = line  + cameraid + " " + pngname + "\n"
-                empltyline = "\n"
-                imagetxtlist.append(line)
-                imagetxtlist.append(empltyline)
-
-                newwidth = 2048
-                newheight = 1088
-                params = np.array((fx , fy, cx, cy,))
-
-                camera_id = db.add_camera(1, newwidth, newheight, params)     # RADIAL_FISHEYE                                                                                 # width and height
-
-                cameraline = str(idx+1) + " " + "PINHOLE " + str(newwidth) +  " " + str(newheight) + " " + str(focolength) + " " + str(focolength)  + " " + str(cx) + " " + str(cy)  + "\n"
-                cameratxtlist.append(cameraline)
-                image_id = db.add_image(pngname, camera_id,  prior_q=np.array((colmapQ[0], colmapQ[1], colmapQ[2], colmapQ[3])), prior_t=np.array((colmapT[0], colmapT[1], colmapT[2])), image_id=idx+1)
-                db.commit()
-                print("commited one")
-    db.close()
+    os.makedirs(manualfolder, exist_ok=True)
+    with open(os.path.join(manualfolder, "images.txt"), "w") as f:
+        f.writelines(imagetxtlist)
+    with open(os.path.join(manualfolder, "cameras.txt"), "w") as f:
+        f.writelines(cameratxtlist)
+    with open(os.path.join(manualfolder, "points3D.txt"), "w") as f:
+        pass
 
 
-    with open(savetxt, "w") as f:
-        for line in imagetxtlist :
-            f.write(line)
-    with open(savecamera, "w") as f:
-        for line in cameratxtlist :
-            f.write(line)
-    with open(savepoints, "w") as f:
-        pass 
+def getcolmapsingletechni_v2(videopath, offset):
+    """COLMAP 3.13-compatible pipeline for Technicolor datasets.
+    delete DB → feature_extractor → update cameras + write manual/ → exhaustive_matcher
+    → point_triangulator → image_undistorter → move sparse/0."""
+    folder = os.path.join(videopath, "colmap_" + str(offset))
+    assert os.path.exists(folder)
+
+    dbfile = os.path.join(folder, "input.db")
+    inputimagefolder = os.path.join(folder, "input")
+    manualfolder = os.path.join(folder, "manual")
+    distortedmodel = os.path.join(folder, "distorted/sparse")
+
+    os.makedirs(distortedmodel, exist_ok=True)
+
+    # Delete DB so feature_extractor creates fresh COLMAP 3.x schema
+    if os.path.exists(dbfile):
+        os.remove(dbfile)
+
+    featureextract = f"colmap feature_extractor --database_path {dbfile} --image_path {inputimagefolder}"
+    exit_code = os.system(featureextract)
+    if exit_code != 0:
+        exit(exit_code)
+
+    # Update cameras with known intrinsics + write manual/ with actual DB image IDs
+    updatetechnicamerasindb(dbfile, videopath, manualfolder)
+
+    featurematcher = f"colmap exhaustive_matcher --database_path {dbfile}"
+    exit_code = os.system(featurematcher)
+    if exit_code != 0:
+        exit(exit_code)
+
+    triandmap = (f"colmap point_triangulator --database_path {dbfile}"
+                 f" --image_path {inputimagefolder}"
+                 f" --output_path {distortedmodel}"
+                 f" --input_path {manualfolder}"
+                 f" --Mapper.ba_global_function_tolerance=0.000001")
+    exit_code = os.system(triandmap)
+    if exit_code != 0:
+        exit(exit_code)
+
+    img_undist_cmd = (f"colmap image_undistorter"
+                      f" --image_path {inputimagefolder}"
+                      f" --input_path {distortedmodel}"
+                      f" --output_path {folder}"
+                      f" --output_type COLMAP")
+    exit_code = os.system(img_undist_cmd)
+    if exit_code != 0:
+        exit(exit_code)
+
+    files = os.listdir(os.path.join(folder, "sparse"))
+    os.makedirs(os.path.join(folder, "sparse", "0"), exist_ok=True)
+    for file in files:
+        if file == '0':
+            continue
+        shutil.move(os.path.join(folder, "sparse", file),
+                    os.path.join(folder, "sparse", "0", file))
 
 
 
@@ -237,6 +268,7 @@ if __name__ == "__main__" :
         videopath = videopath + "/"
     
     srcscene = videopath.split("/")[-2]
+    srcscene = srcscene[0].upper() + srcscene[1:]  # normalize to Title case
     print("srcscene", srcscene)
 
     if srcscene == "Birthday":
@@ -244,13 +276,10 @@ if __name__ == "__main__" :
         fixbroken(videopath + "Birthday_undist_00173_09.png", videopath + "Birthday_undist_00172_09.png")
         
     imagecopy(videopath, offsetlist=framerangedict[srcscene])
-    # #
+
     for offset in tqdm.tqdm(range(0, 50)):
-        convertmodel2dbfiles(videopath, offset=offset)
+        getcolmapsingletechni_v2(videopath, offset=offset)
 
-    for offset in range(0, 50):
-        getcolmapsingletechni(videopath, offset=offset)
-
-    #  rm -r colmap_* # once meet error, delete all colmap_* folders and rerun this script. 
+    #  rm -r colmap_* # once meet error, delete all colmap_* folders and rerun this script.
 
 
