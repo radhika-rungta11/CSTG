@@ -156,7 +156,13 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
 
     selectedlength = 2
-    lasterems = 0 
+    lasterems = 0
+
+    all_cam_names = sorted(set(cam.image_name for cams in traincamdict.values() for cam in cams))
+    cam_loss_csv_path = os.path.join(scene.model_path, "camera_loss.csv")
+    cam_loss_file = open(cam_loss_csv_path, "w", buffering=1)  # line-buffered
+    cam_loss_file.write("iteration," + ",".join(all_cam_names) + "\n")
+    cam_loss_window = {name: [] for name in all_cam_names}
 
     for iteration in range(first_iter, opt.iterations + 1):        
         if iteration ==  opt.emsstart:
@@ -190,7 +196,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                 if random_background:
                     gt_alpha = viewpoint_cam.gt_alpha_mask
                     if gt_alpha is not None:
-                        gt_alpha_cuda = gt_alpha.cuda()
+                        gt_alpha_cuda = (gt_alpha.cuda() > 0.99).float()  # binarize: exclude semi-transparent boundary fringe
                         rand_rgb_3d = background[:3].view(3, 1, 1)
                         gt_image = gt_image * gt_alpha_cuda + rand_rgb_3d * (1.0 - gt_alpha_cuda)
 
@@ -206,6 +212,8 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
                 if ours:
                     loss += opt.lambda_mask*torch.mean((torch.sigmoid(gaussians._mask)))
+
+                cam_loss_window[viewpoint_cam.image_name].append(loss.item())
 
                 if flagems == 1:
                     if viewpoint_cam.image_name not in lossdiect:
@@ -404,17 +412,39 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                 
             # Optimizer step
             if iteration < opt.iterations:
-                gaussians.optimizer.step()        
+                gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
                 if ours:
                     gaussians.optimizer_net.step()
                     gaussians.scheduler_net.step()
                     gaussians.optimizer_net.zero_grad(set_to_none = True)
 
+            # Write per-camera loss table row every 100 iterations
+            if iteration % 100 == 0:
+                row = [str(iteration)]
+                for name in all_cam_names:
+                    vals = cam_loss_window[name]
+                    row.append(f"{sum(vals)/len(vals):.6f}" if vals else "")
+                cam_loss_file.write(",".join(row) + "\n")
+                cam_loss_window = {name: [] for name in all_cam_names}
+
+            # Close CSV at end of training
+            if iteration == opt.iterations:
+                cam_loss_file.close()
+
+            # Periodic visualization every 1000 iterations
+            if iteration % 1000 == 0 and iteration < opt.iterations:
+                vis_cam = traincamdict[0][0]
+                vis_bg = torch.tensor([0.0, 0.0, 0.0] + [0.0] * (numchannel - 3), dtype=torch.float32, device="cuda")
+                with torch.no_grad():
+                    vis_pkg = render(vis_cam, gaussians, pipe, vis_bg, override_color=None, basicfunction=rbfbasefunction, GRsetting=GRsetting, GRzer=GRzer, rvq_iter=(iteration > opt.rvq_iter))
+                vis_outdir = os.path.join(scene.model_path, "output")
+                os.makedirs(vis_outdir, exist_ok=True)
+                torchvision.utils.save_image(vis_pkg["render"], os.path.join(vis_outdir, f"iter_{iteration:05d}.png"))
+
 
 
 if __name__ == "__main__":
-    
 
     args, lp_extract, op_extract, pp_extract = getparser()
     train(lp_extract, op_extract, pp_extract, args.save_iterations, args.debug_from, densify=args.densify, duration=args.duration, rgbfunction=args.rgbfunction, rdpip=args.rdpip, comp=args.comp, store_npz=args.store_npz)

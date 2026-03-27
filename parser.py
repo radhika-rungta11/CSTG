@@ -436,12 +436,38 @@ def main():
     parser.add_argument(
         "--input",
         required=True,
-        help="Input _pp.npz file (or base path without extension)",
+        help="Model log directory (e.g. log/cube_v3) or direct path to _pp.npz",
     )
-    parser.add_argument("--output", required=True, help="Output .4dgs.gz file")
+    parser.add_argument("--output", default=None, help="Output .4dgs.gz file (optional)")
     args = parser.parse_args()
 
-    data = load_pp_npz(args.input)
+    input_path = args.input
+
+    # If input is a directory, find the latest iteration's point_cloud_pp.npz
+    if os.path.isdir(input_path):
+        pc_dir = os.path.join(input_path, "point_cloud")
+        if not os.path.isdir(pc_dir):
+            raise FileNotFoundError(f"No point_cloud/ folder found in {input_path}")
+        iterations = sorted(
+            [d for d in os.listdir(pc_dir) if d.startswith("iteration_")],
+            key=lambda x: int(x.split("_")[1])
+        )
+        if not iterations:
+            raise FileNotFoundError(f"No iteration folders found in {pc_dir}")
+        latest = iterations[-1]
+        input_path = os.path.join(pc_dir, latest, "point_cloud_pp.npz")
+        print(f"Auto-detected: {input_path}")
+
+        if args.output is None:
+            out_dir = os.path.join(args.input, "output")
+            os.makedirs(out_dir, exist_ok=True)
+            name = os.path.basename(os.path.normpath(args.input))
+            args.output = os.path.join(out_dir, f"{name}.4dgs.gz")
+
+    if args.output is None:
+        raise ValueError("--output is required when --input is a file path")
+
+    data = load_pp_npz(input_path)
     write_binary(data, args.output)
     print("Done!")
 
