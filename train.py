@@ -39,7 +39,7 @@ from tqdm import tqdm
 sys.path.append("./thirdparty/gaussian_splatting")
 
 from thirdparty.gaussian_splatting.utils.loss_utils import l1_loss, ssim, l2_loss, rel_loss
-from helper_train import getrenderpip, getmodel, getloss, controlgaussians, reloadhelper, trbfunction
+from helper_train import getrenderpip, getmodel, getloss, controlgaussians, reloadhelper, trbfunction, save_checkpoint, load_checkpoint, find_latest_checkpoint
 from thirdparty.gaussian_splatting.scene import Scene
 from argparse import Namespace
 from thirdparty.gaussian_splatting.helper3dg import getparser, getrenderparts
@@ -50,6 +50,16 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
         cfg_log_f.write(str(Namespace(**vars(args))))
 
     first_iter = 0
+    # Resume from checkpoint if requested
+    resume_flag, resume_flagems, resume_emscnt, resume_lasterems = 0, 0, 0, 0
+    ckpt_to_load = None
+    if args.start_checkpoint:
+        ckpt_to_load = args.start_checkpoint if args.start_checkpoint != "latest" else None
+    if args.start_checkpoint == "latest":
+        ckpt_to_load = find_latest_checkpoint(dataset.model_path)
+        if ckpt_to_load is None:
+            print("No checkpoint found, starting from scratch.")
+
     render, GRsetting, GRzer = getrenderpip(rdpip)
 
     print("use model {}".format(dataset.model))
@@ -86,8 +96,13 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
     minbounds = [minx, miny, minz]
 
 
-    gaussians.training_setup(opt)
-    
+    # Load checkpoint BEFORE training_setup if resuming
+    if ckpt_to_load:
+        first_iter, resume_flag, resume_flagems, resume_emscnt, resume_lasterems = \
+            load_checkpoint(ckpt_to_load, gaussians, opt)
+    else:
+        gaussians.training_setup(opt)
+
     numchannel = 9
 
     random_background = getattr(dataset, 'random_background', False)
@@ -104,7 +119,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
-    flag = 0
+    flag = resume_flag
     flagtwo = 0
     depthdict = {}
 
@@ -122,13 +137,13 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
     scene.recordpoints(0, "start training")
 
                                                             
-    flagems = 0  
-    emscnt = 0
+    flagems = resume_flagems
+    emscnt = resume_emscnt
     lossdiect = {}
     ssimdict = {}
     depthdict = {}
     validdepthdict = {}
-    emsstartfromiterations = opt.emsstart   
+    emsstartfromiterations = opt.emsstart
 
     with torch.no_grad():
         timeindex = 0 # 0 to 49
@@ -156,7 +171,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
 
     selectedlength = 2
-    lasterems = 0
+    lasterems = resume_lasterems
 
     all_cam_names = sorted(set(cam.image_name for cams in traincamdict.values() for cam in cams))
     cam_loss_csv_path = os.path.join(scene.model_path, "camera_loss.csv")
@@ -266,6 +281,9 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, compress=comp, store=store_npz)
+
+            if args.checkpoint_iterations and iteration in args.checkpoint_iterations:
+                save_checkpoint(gaussians, opt, flag, iteration, flagems, emscnt, lasterems, dataset.model_path)
 
 
 
@@ -437,7 +455,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                 vis_cam = traincamdict[0][0]
                 vis_bg = torch.tensor([0.0, 0.0, 0.0] + [0.0] * (numchannel - 3), dtype=torch.float32, device="cuda")
                 with torch.no_grad():
-                    vis_pkg = render(vis_cam, gaussians, pipe, vis_bg, override_color=None, basicfunction=rbfbasefunction, GRsetting=GRsetting, GRzer=GRzer, rvq_iter=(iteration > opt.rvq_iter))
+                    vis_pkg = render(vis_cam, gaussians, pipe, vis_bg, override_color=None, basicfunction=rbfbasefunction, GRsetting=GRsetting, GRzer=GRzer, rvq_iter=False)
                 vis_outdir = os.path.join(scene.model_path, "output")
                 os.makedirs(vis_outdir, exist_ok=True)
                 torchvision.utils.save_image(vis_pkg["render"], os.path.join(vis_outdir, f"iter_{iteration:05d}.png"))

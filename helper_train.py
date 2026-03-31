@@ -350,5 +350,90 @@ def undistortimage(imagename, datasetpath,data):
         image_size = (w, h)
         knew = np.zeros((3, 3), dtype=np.float32)
 
-def trbfunction(x): 
+def trbfunction(x):
     return torch.exp(-1*x.pow(2))
+
+
+def save_checkpoint(gaussians, opt, flag, iteration, flagems, emscnt, lasterems, model_path):
+    """Save full training state for resume."""
+    import torch.nn as nn
+    ckpt_dir = os.path.join(model_path, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    ckpt_path = os.path.join(ckpt_dir, f"ckpt_{iteration:06d}.pth")
+
+    param_names = ['_xyz', '_features_dc', '_features_t', '_opacity', '_scaling',
+                   '_rotation', '_omega', '_trbf_center', '_trbf_scale', '_motion', '_mask']
+    gaussian_params = {n: getattr(gaussians, n).detach().cpu()
+                       for n in param_names if hasattr(gaussians, n) and getattr(gaussians, n) is not None}
+
+    net_state = {name: getattr(gaussians, name).state_dict()
+                 for name in ['recolor', 'mlp_head', 'rgbdecoder']
+                 if hasattr(gaussians, name)}
+
+    torch.save({
+        'iteration': iteration,
+        'flag': flag,
+        'flagems': flagems,
+        'emscnt': emscnt,
+        'lasterems': lasterems,
+        'omegamask': gaussians.omegamask.cpu() if gaussians.omegamask is not None else None,
+        'spatial_lr_scale': gaussians.spatial_lr_scale,
+        'gaussian_params': gaussian_params,
+        'densify_state': {
+            'max_radii2D': gaussians.max_radii2D.detach().cpu(),
+            'xyz_gradient_accum': gaussians.xyz_gradient_accum.detach().cpu(),
+            'denom': gaussians.denom.detach().cpu(),
+        },
+        'net_state': net_state,
+        'optimizer': gaussians.optimizer.state_dict(),
+        'optimizer_net': gaussians.optimizer_net.state_dict(),
+        'scheduler_net': gaussians.scheduler_net.state_dict(),
+    }, ckpt_path)
+    print(f"\n[ITER {iteration}] Checkpoint saved: {ckpt_path}")
+    return ckpt_path
+
+
+def load_checkpoint(ckpt_path, gaussians, opt):
+    """Restore full training state from checkpoint."""
+    import torch.nn as nn
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    print(f"Resuming from checkpoint: {ckpt_path} (iteration {ckpt['iteration']})")
+
+    # Restore gaussian parameters
+    for name, tensor in ckpt['gaussian_params'].items():
+        setattr(gaussians, name, nn.Parameter(tensor.cuda()))
+
+    gaussians.spatial_lr_scale = ckpt['spatial_lr_scale']
+
+    # Restore neural networks before training_setup
+    for name, state in ckpt['net_state'].items():
+        if hasattr(gaussians, name):
+            getattr(gaussians, name).load_state_dict(state)
+
+    # Re-create optimizers (they reference the restored parameter objects)
+    gaussians.training_setup(opt)
+
+    # Restore optimizer states
+    gaussians.optimizer.load_state_dict(ckpt['optimizer'])
+    gaussians.optimizer_net.load_state_dict(ckpt['optimizer_net'])
+    gaussians.scheduler_net.load_state_dict(ckpt['scheduler_net'])
+
+    # Restore densification accumulators
+    gaussians.max_radii2D = ckpt['densify_state']['max_radii2D'].cuda()
+    gaussians.xyz_gradient_accum = ckpt['densify_state']['xyz_gradient_accum'].cuda()
+    gaussians.denom = ckpt['densify_state']['denom'].cuda()
+
+    if ckpt['omegamask'] is not None:
+        gaussians.omegamask = ckpt['omegamask'].cuda()
+
+    return (ckpt['iteration'], ckpt['flag'],
+            ckpt['flagems'], ckpt['emscnt'], ckpt['lasterems'])
+
+
+def find_latest_checkpoint(model_path):
+    """Return path to the latest checkpoint in model_path/checkpoints/, or None."""
+    ckpt_dir = os.path.join(model_path, "checkpoints")
+    if not os.path.isdir(ckpt_dir):
+        return None
+    ckpts = sorted(f for f in os.listdir(ckpt_dir) if f.startswith("ckpt_") and f.endswith(".pth"))
+    return os.path.join(ckpt_dir, ckpts[-1]) if ckpts else None
