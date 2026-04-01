@@ -1,5 +1,5 @@
 {
-  "resolution": 2,
+  "resolution": 1,
   "model": "ours",
   "loader": "colmap",
   "white_background": false,
@@ -24,5 +24,6 @@
   "net_lr": 0.001,
   "net_lr_step": [3000, 6000, 9000, 12000, 15000, 18000],
   "lambda_mask": 0.00005,
+  "lambda_edge": 0.1,
   "emsstart": 99999
 }

@@ -18,11 +18,14 @@
   "rvq_size_temp": 256,
   "rvq_num_temp": 3,
   "desicnt": 15,
+  "densify_until_iter": 20000,
+  "densify_grad_threshold": 0.0001,
   "mask_prune_iter": 3000,
   "rvq_iter": 59000,
   "mask_lr": 0.01,
   "net_lr": 0.001,
   "net_lr_step": [3000, 6000, 9000, 12000, 18000, 21000, 24000, 27000, 33000, 39000, 45000, 51000, 57000],
   "lambda_mask": 0.00005,
+  "lambda_edge": 0.1,
   "emsstart": 99999
 }
