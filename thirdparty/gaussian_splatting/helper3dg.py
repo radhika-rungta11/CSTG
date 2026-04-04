@@ -482,14 +482,8 @@ def triangulateperframe(basefolder, offset):
     os.makedirs(tri_out, exist_ok=True)
     os.makedirs(sparse_dst, exist_ok=True)
 
-    # Export colmap_0 poses to text format for use as known poses
-    cmd = ("colmap model_converter"
-           " --input_path " + colmap0_sparse +
-           " --output_path " + manual_dir +
-           " --output_type TXT")
-    exit_code = os.system(cmd)
-    if exit_code != 0:
-        exit(exit_code)
+    # Use colmap_0 binary sparse directly — no TXT conversion needed, and binary
+    # preserves rig metadata that TXT export drops.
 
     # Copy undistorted images to input/ for feature extraction
     for img in sorted(os.listdir(images_dir)):
@@ -500,15 +494,30 @@ def triangulateperframe(basefolder, offset):
         if not os.path.exists(dst):
             shutil.copy(src, dst)
 
-    # Remove stale DB
-    if os.path.exists(dbfile):
+    # Seed the DB from colmap_0 to preserve camera/rig definitions (COLMAP 3.10+
+    # uses a rig/frame schema; a fresh DB gets different RigIds than colmap_0's
+    # reconstruction, causing point_triangulator to crash with RigId mismatch).
+    colmap0_db = os.path.join(basefolder, "colmap_0", "input.db")
+    if os.path.exists(colmap0_db):
+        shutil.copy(colmap0_db, dbfile)
+        import sqlite3
+        conn = sqlite3.connect(dbfile)
+        for tbl in ["keypoints", "descriptors", "matches", "two_view_geometries", "images", "frames"]:
+            try:
+                conn.execute(f"DELETE FROM {tbl}")
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+    elif os.path.exists(dbfile):
         os.remove(dbfile)
 
-    # Feature extraction
+    # Feature extraction — reuse camera 1 from colmap_0 (no single_camera flag
+    # needed since the camera already exists in the seeded DB)
     cmd = ("colmap feature_extractor"
            " --database_path " + dbfile +
            " --image_path " + input_dir +
-           " --ImageReader.single_camera 1"
+           " --ImageReader.existing_camera_id 1"
            " --ImageReader.camera_model PINHOLE"
            " --SiftExtraction.max_num_features 16384"
            " --SiftExtraction.peak_threshold 0.001"
@@ -524,12 +533,12 @@ def triangulateperframe(basefolder, offset):
     if exit_code != 0:
         exit(exit_code)
 
-    # Triangulate using known poses from colmap_0
+    # Triangulate using known poses from colmap_0 (binary, preserves rig info)
     cmd = ("colmap point_triangulator"
            " --database_path " + dbfile +
            " --image_path " + input_dir +
            " --output_path " + tri_out +
-           " --input_path " + manual_dir +
+           " --input_path " + colmap0_sparse +
            " --Mapper.ba_global_function_tolerance=0.000001")
     exit_code = os.system(cmd)
     if exit_code != 0:
