@@ -9,25 +9,26 @@
   "preprocesspoints": 0,
 
   "densify": 3,
-  "densify_until_iter": 10000,
-  "densify_grad_threshold": 0.0003,
-  "desicnt": 12,
+  "densify_until_iter": 9000,
+  "densify_grad_threshold": 0.0002,
+  "desicnt": 10,
+
   "iterations": 40000,
   "test_iteration": 40000,
 
-  "duration": 17,
+  "duration": 1,
 
   "rdpip": "train_ours_full",
   "rgbfunction": "sandwich",
 
-  "max_hashmap": 14,
+  "max_hashmap": 16,
 
   "rvq_size_geo": 256,
   "rvq_num_geo": 4,
   "rvq_size_temp": 256,
   "rvq_num_temp": 3,
 
-  "mask_prune_iter": 5000,
+  "mask_prune_iter": 3000,
 
   "rvq_iter": 38000,
 
@@ -35,12 +36,12 @@
   "net_lr": 0.001,
 
   "net_lr_step": [
-    5000,
-    10000,
+    3000,
+    6000,
+    9000,
     15000,
     22000,
-    30000,
-    36000
+    30000
   ],
 
   "lambda_mask": 0.0005,
