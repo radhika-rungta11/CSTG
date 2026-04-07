@@ -8,8 +8,7 @@
   "preprocesspoints": 0,
   "densify": 3,
   "iterations": 25000,
-  "test_iteration": 25000,
-  "duration": 17,
+  "duration": 1,
   "rdpip": "train_ours_full",
   "rgbfunction": "sandwich",
   "max_hashmap": 14,
@@ -24,7 +23,5 @@
   "net_lr": 0.001,
   "net_lr_step": [3000, 6000, 9000, 12000, 18000, 21000],
   "lambda_mask": 0.0005,
-  "lambda_lpips": 0.05,
-  "lpips_start_iter": 10000,
   "emsstart": 8000
 }
