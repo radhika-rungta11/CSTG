@@ -27,6 +27,19 @@ import natsort
 from simple_knn._C import distCUDA2
 import torch
 
+_IMG_EXTS = (".jpg", ".jpeg", ".png")
+
+def _resolve_image_path(path):
+    """Try alternative image extensions if the exact path doesn't exist."""
+    if os.path.exists(path):
+        return path
+    stem, _ = os.path.splitext(path)
+    for ext in _IMG_EXTS:
+        alt = stem + ext
+        if os.path.exists(alt):
+            return alt
+    return path
+
 class CameraInfo(NamedTuple):
     uid: int
     R: np.array
@@ -138,17 +151,10 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, near, far, 
             image_path = os.path.join(images_folder, os.path.basename(extr.name))
             image_name = os.path.basename(image_path).split(".")[0]
             image_path = image_path.replace("colmap_"+str(startime), "colmap_{}".format(j), 1)
+            image_path = _resolve_image_path(image_path)
             assert os.path.exists(image_path), "Image {} does not exist!".format(image_path)
             image = Image.open(image_path)
             image.load()  # force-read so PIL closes the file descriptor
-            # Attach alpha mask as 4th channel if available (for masked training loss)
-            mask_path = image_path.replace("/images/", "/masks/")
-            if os.path.exists(mask_path):
-                mask_pil = Image.open(mask_path).convert("L")
-                mask_pil.load()
-                rgb = image.convert("RGB")
-                r, g, b = rgb.split()
-                image = Image.merge("RGBA", (r, g, b, mask_pil))
             if j == startime:
                 # cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path, image_name=image_name, width=width, height=height, near=near, far=far, timestamp=(j-startime)/duration, pose=hpposes[sortednamedict[os.path.basename(extr.name)]], hpdirecitons=hpdirecitons,cxr=0.0, cyr=0.0)
                 cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path, image_name=image_name, width=width, height=height, near=near, far=far, timestamp=(j-startime)/duration, pose=1, hpdirecitons=1,cxr=0.0, cyr=0.0)
@@ -404,8 +410,8 @@ def readColmapCamerasImmersive(cam_extrinsics, cam_intrinsics, images_folder, ne
 
             rawvideofolder = os.path.join(parentfolder,os.path.basename(image_name))
 
-            image_path = os.path.join(rawvideofolder, str(j) + ".png")
-            
+            image_path = _resolve_image_path(os.path.join(rawvideofolder, str(j) + ".png"))
+
             #image_path.replace("colmap_"+str(startime), "colmap_{}".format(j), 1)
             
             # K = np.eye(3)
@@ -500,8 +506,8 @@ def readColmapCamerasImmersiveTestonly(cam_extrinsics, cam_intrinsics, images_fo
 
             rawvideofolder = os.path.join(parentfolder,os.path.basename(image_name))
 
-            image_path = os.path.join(rawvideofolder, str(j) + ".png")
-            
+            image_path = _resolve_image_path(os.path.join(rawvideofolder, str(j) + ".png"))
+
             #image_path.replace("colmap_"+str(startime), "colmap_{}".format(j), 1)
             
             # K = np.eye(3)
@@ -1147,8 +1153,8 @@ def readColmapCamerasImmersivev2(cam_extrinsics, cam_intrinsics, images_folder, 
 
             rawvideofolder = os.path.join(parentfolder,os.path.basename(image_name))
 
-            image_path = os.path.join(rawvideofolder, str(j) + ".png")
-            
+            image_path = _resolve_image_path(os.path.join(rawvideofolder, str(j) + ".png"))
+
             #image_path.replace("colmap_"+str(startime), "colmap_{}".format(j), 1)
             
             # K = np.eye(3)

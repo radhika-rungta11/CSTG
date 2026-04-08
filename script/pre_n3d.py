@@ -31,20 +31,23 @@ import sys
 import argparse
 sys.path.append(".")
 from thirdparty.gaussian_splatting.utils.my_utils import posetow2c_matrcs, rotmat2qvec
-from thirdparty.colmap.pre_colmap import * 
+from thirdparty.colmap.pre_colmap import *
 from thirdparty.gaussian_splatting.helper3dg import getcolmapsinglen3d
 
+SUPPORTED_EXTS = (".jpg", ".jpeg", ".png")
 
 
 
-def extractframes(videopath, startframe=0, endframe=300):
+
+def extractframes(videopath, startframe=0, endframe=300, fmt="jpg", quality=95):
     outdir = videopath.replace(".mp4", "")
     needed = list(range(startframe, endframe))
-    if all(os.path.exists(os.path.join(outdir, str(i) + ".png")) for i in needed):
+    if all(os.path.exists(os.path.join(outdir, str(i) + "." + fmt)) for i in needed):
         print("already extracted needed frames, skip extracting")
         return
     if not os.path.exists(outdir):
         os.makedirs(outdir)
+    params = [cv2.IMWRITE_JPEG_QUALITY, quality] if fmt == "jpg" else []
     cam = cv2.VideoCapture(videopath)
     for i in range(endframe):
         success, frame = cam.read()
@@ -52,20 +55,18 @@ def extractframes(videopath, startframe=0, endframe=300):
             print(f"error reading frame {i}")
             break
         if i >= startframe:
-            cv2.imwrite(os.path.join(outdir, str(i) + ".png"), frame)
+            cv2.imwrite(os.path.join(outdir, str(i) + "." + fmt), frame, params)
     cam.release()
 
 
 def resolveframepath(camfolder, frame_idx):
-    """Find the image for frame_idx, supporting plain (0.png) or zero-padded (00000.png) naming."""
-    plain = os.path.join(camfolder, str(frame_idx) + ".png")
-    if os.path.exists(plain):
-        return plain
-    # try zero-padded variants (up to 5 digits)
-    for pad in range(2, 6):
-        padded = os.path.join(camfolder, str(frame_idx).zfill(pad) + ".png")
-        if os.path.exists(padded):
-            return padded
+    """Find the image for frame_idx, supporting plain (0.ext) or zero-padded (00000.ext) naming."""
+    names = [str(frame_idx)] + [str(frame_idx).zfill(pad) for pad in range(2, 6)]
+    for name in names:
+        for ext in SUPPORTED_EXTS:
+            path = os.path.join(camfolder, name + ext)
+            if os.path.exists(path):
+                return path
     raise FileNotFoundError(f"No image for frame {frame_idx} in {camfolder}")
 
 
@@ -79,7 +80,8 @@ def preparecolmapdynerf(folder, offset=0):
         os.mkdir(savedir)
     for camfolder in folderlist:
         imagepath = resolveframepath(camfolder, offset)
-        imagesavepath = os.path.join(savedir, camfolder.split("/")[-2] + ".png")
+        src_ext = os.path.splitext(imagepath)[1]
+        imagesavepath = os.path.join(savedir, camfolder.split("/")[-2] + src_ext)
         shutil.copy(imagepath, imagesavepath)
 
 
@@ -118,6 +120,10 @@ def convertdynerftocolmapdb(path, offset=0):
 
     db.create_tables()
 
+    # Detect image extension from files in input/
+    input_dir = os.path.join(projectfolder, "input")
+    sample = next((f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))), None)
+    img_ext = os.path.splitext(sample)[1] if sample else ".png"
 
     with open(originnumpy, 'rb') as numpy_file:
         poses_bounds = np.load(numpy_file)
@@ -145,7 +151,7 @@ def convertdynerftocolmapdb(path, offset=0):
 
             imageid = str(i+1)
             cameraid = imageid
-            pngname = cameraname + ".png"
+            pngname = cameraname + img_ext
             
             line =  imageid + " "
 
@@ -189,9 +195,13 @@ if __name__ == "__main__" :
     parser.add_argument("--videopath", default="", type=str)
     parser.add_argument("--startframe", default=0, type=int)
     parser.add_argument("--endframe", default=50, type=int)
+    parser.add_argument("--format", default="jpg", choices=["png", "jpg"], help="Output image format (default: jpg)")
+    parser.add_argument("--jpeg-quality", default=95, type=int, help="JPEG quality 1-100 (default: 95)")
 
     args = parser.parse_args()
     videopath = args.videopath
+    fmt = args.format
+    quality = args.jpeg_quality
 
     startframe = args.startframe
     endframe = args.endframe
@@ -217,7 +227,7 @@ if __name__ == "__main__" :
     if videoslist:
         print(f"start extracting frames {startframe}-{endframe} from videos")
         for v in tqdm.tqdm(videoslist):
-            extractframes(v, startframe, endframe)
+            extractframes(v, startframe, endframe, fmt=fmt, quality=quality)
     else:
         print("no videos found, assuming images are already extracted in cam*/ folders")
 
