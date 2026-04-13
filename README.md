@@ -146,6 +146,73 @@ The pipeline supports both PNG and JPEG images. JPEG is recommended for training
 
 The training loader (`dataset_readers.py`) includes a format-agnostic fallback: if COLMAP metadata references `.png` but only `.jpg` exists on disk (or vice versa), the loader will find the correct file automatically.
 
+## Hyperparameter Tuning
+
+Automated Bayesian hyperparameter optimization using Optuna. The tuner searches over 18 parameters (learning rates, densification, model capacity, etc.) and uses PSNR as the objective.
+
+### Setup
+```bash
+pip install optuna optuna-dashboard
+```
+
+### Single-objective (maximize PSNR)
+```bash
+python script/optuna_tuner.py \
+  --source_path data/horse_ol/colmap_0 \
+  --base_config configs/custom_default.json \
+  --n_trials 20 \
+  --study_name horse_tuning \
+  --output_dir optuna_runs
+```
+
+Bad trials are pruned early (killed at iter 5000+ if PSNR is below median), saving GPU time. First 3 trials always run to completion to build a baseline.
+
+### Multi-objective (maximize PSNR + minimize gaussian count)
+```bash
+python script/optuna_tuner.py \
+  --source_path data/horse_ol/colmap_0 \
+  --base_config configs/custom_default.json \
+  --n_trials 20 \
+  --study_name horse_pareto \
+  --output_dir optuna_runs \
+  --multi_objective
+```
+
+Finds the Pareto front of configs that trade off quality vs model size.
+
+### Monitoring
+
+Training outputs `metrics.json` every 100 iterations with PSNR, SSIM, loss, and gaussian count. View live results with the Optuna dashboard:
+```bash
+optuna-dashboard sqlite:///<output_dir>/<study_name>.db --port 8081 --host 0.0.0.0
+```
+
+Access via SSH tunnel: `ssh -L 8081:localhost:8081 <your-ssh-command>`
+
+Each trial's training log is at `<output_dir>/<study_name>/trial_NNN/stdout.log`.
+
+### Custom datasets
+
+Use `configs/custom_default.json` as a starting point. Set `duration` to your frame count and `resolution` to 1 (full-res) or 2 (half-res). The tuner explores the rest:
+
+| Parameter | Range | Description |
+|-----------|-------|-------------|
+| scaling_lr | [0.0003, 0.005] | Scale learning rate |
+| opacity_lr | [0.01, 0.1] | Opacity learning rate |
+| mask_lr | [0.003, 0.02] | Mask learning rate |
+| densify_grad_threshold | [0.00003, 0.0005] | Gradient threshold for densification |
+| gnumlimit | [300K, 3M] | Max gaussian count |
+| densify_until_iter | [10K, 30K] | When to stop densifying |
+| lambda_mask | [0.0002, 0.005] | Mask loss weight |
+| lambda_dssim | [0.1, 0.4] | SSIM weight in loss |
+| max_hashmap | [14, 18] | Hash grid size (log2) |
+| rvq_size_geo/temp | [256, 512, 1024] | RVQ codebook size |
+| rvq_num_geo/temp | [3, 5] | RVQ layers |
+| iterations | [20K, 45K] | Training length |
+| emsstart | [6K, 20K] | Error-guided sampling start |
+| desicnt | [6, 18] | Densification count |
+| mask_prune_iter | [500, 2000] | Pruning interval |
+
 ## Scripts Reference
 
 | Script | Description |
@@ -155,6 +222,7 @@ The training loader (`dataset_readers.py`) includes a format-agnostic fallback: 
 | `script/extract_frames.py` | Standalone frame extraction from `Cam_N.mp4` videos |
 | `script/convert_to_jpeg.py` | Batch-convert PNG images to JPEG in `cam_*/` folders |
 | `script/parser.py` | Convert `_pp.npz` checkpoint to `.4dgs.gz` binary format |
+| `script/optuna_tuner.py` | Optuna hyperparameter tuner (single or multi-objective) |
 | `script/post.py` | Post-processing utilities (video generation, metrics) |
 | `script/setup.sh` | Environment setup script |
 

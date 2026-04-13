@@ -83,24 +83,25 @@ def read_metrics(metrics_path):
         return {}
 
 
-def read_final_psnr(metrics_path):
-    """Read final PSNR from completed training."""
+def read_final_metrics(metrics_path):
+    """Read final PSNR and gaussian count from completed training."""
     if not os.path.exists(metrics_path):
-        return None
+        return None, None
     try:
         with open(metrics_path, 'r') as f:
             data = json.load(f)
         if "final" in data:
-            return data["final"]["avg_psnr"]
+            return data["final"]["avg_psnr"], data["final"]["num_gaussians"]
         if data.get("metrics"):
-            return data["metrics"][-1]["avg_psnr"]
+            last = data["metrics"][-1]
+            return last["avg_psnr"], last["num_gaussians"]
     except (json.JSONDecodeError, KeyError):
         pass
-    return None
+    return None, None
 
 
-def objective(trial, args, base_config):
-    trial_dir = os.path.join(args.output_dir, f"trial_{trial.number:03d}")
+def objective(trial, args, base_config, multi_objective=False):
+    trial_dir = os.path.join(args.output_dir, args.study_name, f"trial_{trial.number:03d}")
     os.makedirs(trial_dir, exist_ok=True)
 
     # Suggest params and write config
@@ -142,7 +143,7 @@ def objective(trial, args, base_config):
                     last_psnr = psnr_val
                     report_step += 1
 
-                    if trial.should_prune():
+                    if not multi_objective and trial.should_prune():
                         process.terminate()
                         try:
                             process.wait(timeout=30)
@@ -175,11 +176,23 @@ def objective(trial, args, base_config):
         stdout_file.close()
         raise
 
-    # Read final PSNR
-    final_psnr = read_final_psnr(metrics_path)
+    # Read final metrics
+    final_psnr, final_gaussians = read_final_metrics(metrics_path)
     if final_psnr is not None:
+        if multi_objective:
+            return final_psnr, final_gaussians
         return final_psnr
     if last_psnr is not None:
+        if multi_objective:
+            # Try to get last gaussian count from metrics
+            try:
+                with open(metrics_path) as f:
+                    data = json.load(f)
+                if data.get("metrics"):
+                    return last_psnr, data["metrics"][-1]["num_gaussians"]
+            except (json.JSONDecodeError, KeyError):
+                pass
+            return last_psnr, 0
         return last_psnr
     raise optuna.TrialPruned("No metrics available after training")
 
@@ -192,6 +205,7 @@ def main():
     parser.add_argument("--study_name", default="cstg_tuning", help="Optuna study name (used for DB filename)")
     parser.add_argument("--output_dir", default="log/optuna_runs", help="Directory for trial outputs")
     parser.add_argument("--timeout", type=int, default=None, help="Total study timeout in seconds")
+    parser.add_argument("--multi_objective", action="store_true", help="Maximize PSNR while minimizing gaussian count")
     args = parser.parse_args()
 
     with open(args.base_config) as f:
@@ -201,22 +215,34 @@ def main():
 
     storage = f"sqlite:///{os.path.join(os.path.abspath(args.output_dir), args.study_name + '.db')}"
 
-    pruner = MedianPruner(
-        n_startup_trials=3,   # first 3 trials run to completion
-        n_warmup_steps=2,     # don't prune before step 2 (iter 5000)
-    )
     sampler = TPESampler(seed=42, n_startup_trials=5)
 
-    study = optuna.create_study(
-        study_name=args.study_name,
-        storage=storage,
-        load_if_exists=True,
-        direction="maximize",
-        pruner=pruner,
-        sampler=sampler,
-    )
+    if args.multi_objective:
+        # Multi-objective: no pruner (not supported), Pareto front
+        study = optuna.create_study(
+            study_name=args.study_name,
+            storage=storage,
+            load_if_exists=True,
+            directions=["maximize", "minimize"],  # PSNR up, gaussians down
+            sampler=sampler,
+        )
+    else:
+        pruner = MedianPruner(
+            n_startup_trials=3,
+            n_warmup_steps=2,
+        )
+        study = optuna.create_study(
+            study_name=args.study_name,
+            storage=storage,
+            load_if_exists=True,
+            direction="maximize",
+            pruner=pruner,
+            sampler=sampler,
+        )
 
+    mode = "multi-objective (PSNR + gaussian count)" if args.multi_objective else "single-objective (PSNR)"
     print(f"Starting Optuna study: {args.study_name}")
+    print(f"  Mode: {mode}")
     print(f"  Base config: {args.base_config}")
     print(f"  Source path: {args.source_path}")
     print(f"  Trials: {args.n_trials}")
@@ -225,7 +251,7 @@ def main():
     print()
 
     study.optimize(
-        lambda trial: objective(trial, args, base_config),
+        lambda trial: objective(trial, args, base_config, multi_objective=args.multi_objective),
         n_trials=args.n_trials,
         timeout=args.timeout,
         catch=(Exception,),
@@ -239,15 +265,22 @@ def main():
     print(f"  Completed: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])}")
     print(f"  Pruned: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}")
     print(f"  Failed: {len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])}")
-    print(f"\nBest trial: #{study.best_trial.number}")
-    print(f"Best PSNR: {study.best_value:.4f}")
+
+    if args.multi_objective:
+        print(f"\nPareto front ({len(study.best_trials)} trials):")
+        for t in study.best_trials:
+            print(f"  Trial #{t.number}: PSNR={t.values[0]:.4f}, Gaussians={int(t.values[1]):,}")
+    else:
+        print(f"\nBest trial: #{study.best_trial.number}")
+        print(f"Best PSNR: {study.best_value:.4f}")
     print(f"Best params:")
-    for k, v in study.best_params.items():
+    best_trial = study.best_trials[0] if args.multi_objective else study.best_trial
+    for k, v in best_trial.params.items():
         print(f"  {k}: {v}")
 
     # Write best config
     best_config = dict(base_config)
-    best_config.update(study.best_params)
+    best_config.update(best_trial.params)
     best_config["rvq_iter"] = max(best_config["iterations"] - 2000, best_config["densify_until_iter"] + 1000)
     n_steps = max(4, best_config["iterations"] // 5000)
     best_config["net_lr_step"] = [int(best_config["iterations"] * (i + 1) / (n_steps + 1)) for i in range(n_steps)]
