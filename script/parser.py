@@ -448,21 +448,23 @@ def main():
         pc_dir = os.path.join(input_path, "point_cloud")
         if not os.path.isdir(pc_dir):
             raise FileNotFoundError(f"No point_cloud/ folder found in {input_path}")
+
         iterations = sorted(
             [d for d in os.listdir(pc_dir) if d.startswith("iteration_")],
             key=lambda x: int(x.split("_")[1])
         )
         if not iterations:
             raise FileNotFoundError(f"No iteration folders found in {pc_dir}")
+
         latest = iterations[-1]
         input_path = os.path.join(pc_dir, latest, "point_cloud_pp.npz")
         print(f"Auto-detected: {input_path}")
 
         if args.output is None:
-            out_dir = os.path.join(args.input, "output")
-            os.makedirs(out_dir, exist_ok=True)
+            # ✅ changed output location
+            os.makedirs(pc_dir, exist_ok=True)
             name = os.path.basename(os.path.normpath(args.input))
-            args.output = os.path.join(out_dir, f"{name}.4dgs.gz")
+            args.output = os.path.join(pc_dir, f"{name}.4dgs.gz")
 
     if args.output is None:
         raise ValueError("--output is required when --input is a file path")
