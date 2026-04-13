@@ -61,7 +61,7 @@ def extractframes(videopath, startframe=0, endframe=300, fmt="jpg", quality=95):
 
 def resolveframepath(camfolder, frame_idx):
     """Find the image for frame_idx, supporting plain (0.ext) or zero-padded (00000.ext) naming."""
-    names = [str(frame_idx)] + [str(frame_idx).zfill(pad) for pad in range(2, 6)]
+    names = [str(frame_idx)] + [str(frame_idx).zfill(pad) for pad in range(2, 7)]
     for name in names:
         for ext in SUPPORTED_EXTS:
             path = os.path.join(camfolder, name + ext)
