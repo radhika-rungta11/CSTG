@@ -39,6 +39,7 @@ from tqdm import tqdm
 sys.path.append("./thirdparty/gaussian_splatting")
 
 from thirdparty.gaussian_splatting.utils.loss_utils import l1_loss, ssim, l2_loss, rel_loss
+from thirdparty.gaussian_splatting.utils.image_utils import psnr
 from helper_train import getrenderpip, getmodel, getloss, controlgaussians, reloadhelper, trbfunction, save_checkpoint, load_checkpoint, find_latest_checkpoint
 from thirdparty.gaussian_splatting.scene import Scene
 from argparse import Namespace
@@ -179,6 +180,20 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
     cam_loss_file.write("iteration," + ",".join(all_cam_names) + "\n")
     cam_loss_window = {name: [] for name in all_cam_names}
 
+    # Metrics tracking for JSON output (used by Optuna tuner)
+    metrics_list = []
+    psnr_window = []
+    ssim_window = []
+    loss_window = []
+    metrics_json_path = os.path.join(scene.model_path, "metrics.json")
+    metrics_config = {}
+    for k, v in sorted(vars(args).items()):
+        try:
+            json.dumps(v)
+            metrics_config[k] = v
+        except (TypeError, ValueError):
+            metrics_config[k] = str(v)
+
     for iteration in range(first_iter, opt.iterations + 1):        
         if iteration ==  opt.emsstart:
             flagems = 1 # start ems
@@ -229,6 +244,13 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                     loss += opt.lambda_mask*torch.mean((torch.sigmoid(gaussians._mask)))
 
                 cam_loss_window[viewpoint_cam.image_name].append(loss.item())
+
+                with torch.no_grad():
+                    psnr_val = psnr(image.unsqueeze(0), gt_image.unsqueeze(0)).mean().item()
+                    ssim_val = ssim(image.detach(), gt_image.detach()).item()
+                psnr_window.append(psnr_val)
+                ssim_window.append(ssim_val)
+                loss_window.append(loss.item())
 
                 if flagems == 1:
                     if viewpoint_cam.image_name not in lossdiect:
@@ -437,7 +459,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                     gaussians.scheduler_net.step()
                     gaussians.optimizer_net.zero_grad(set_to_none = True)
 
-            # Write per-camera loss table row every 100 iterations
+            # Write per-camera loss table row and metrics JSON every 100 iterations
             if iteration % 100 == 0:
                 row = [str(iteration)]
                 for name in all_cam_names:
@@ -446,9 +468,37 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                 cam_loss_file.write(",".join(row) + "\n")
                 cam_loss_window = {name: [] for name in all_cam_names}
 
-            # Close CSV at end of training
+                # Write metrics JSON (atomic for safe reading by Optuna)
+                if psnr_window:
+                    metrics_list.append({
+                        "iteration": iteration,
+                        "avg_loss": round(sum(loss_window) / len(loss_window), 6),
+                        "avg_psnr": round(sum(psnr_window) / len(psnr_window), 4),
+                        "avg_ssim": round(sum(ssim_window) / len(ssim_window), 6),
+                        "num_gaussians": gaussians.get_xyz.shape[0]
+                    })
+                    psnr_window.clear()
+                    ssim_window.clear()
+                    loss_window.clear()
+                    metrics_tmp = metrics_json_path + ".tmp"
+                    with open(metrics_tmp, 'w') as mf:
+                        json.dump({"config": metrics_config, "metrics": metrics_list}, mf)
+                    os.replace(metrics_tmp, metrics_json_path)
+
+            # Close CSV and write final metrics at end of training
             if iteration == opt.iterations:
                 cam_loss_file.close()
+                final_entry = metrics_list[-1] if metrics_list else {"avg_loss": 0, "avg_psnr": 0, "avg_ssim": 0}
+                final_metrics = {
+                    "avg_loss": final_entry["avg_loss"],
+                    "avg_psnr": final_entry["avg_psnr"],
+                    "avg_ssim": final_entry["avg_ssim"],
+                    "num_gaussians": gaussians.get_xyz.shape[0],
+                }
+                metrics_tmp = metrics_json_path + ".tmp"
+                with open(metrics_tmp, 'w') as mf:
+                    json.dump({"config": metrics_config, "metrics": metrics_list, "final": final_metrics}, mf)
+                os.replace(metrics_tmp, metrics_json_path)
 
             # Periodic visualization every 1000 iterations
             if iteration % 1000 == 0 and iteration < opt.iterations:

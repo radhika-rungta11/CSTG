@@ -7,3 +7,4 @@ script/__pycache__/
 thirdparty/colmap/__pycache__/
 thirdparty/gaussian_splatting/submodules/simple-knn/simple_knn.egg-info/
 thirdparty/mmcv/
+optuna*
