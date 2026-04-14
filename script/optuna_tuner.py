@@ -134,25 +134,26 @@ def objective(trial, args, base_config, multi_objective=False):
             # Read intermediate metrics
             psnr_by_iter = read_metrics(metrics_path)
 
-            # Report at checkpoint iterations
+            # Report at checkpoint iterations (single-objective only)
             while report_step < len(REPORT_ITERS):
                 target_iter = REPORT_ITERS[report_step]
                 if target_iter in psnr_by_iter:
                     psnr_val = psnr_by_iter[target_iter]
-                    trial.report(psnr_val, step=report_step)
                     last_psnr = psnr_val
                     report_step += 1
 
-                    if not multi_objective and trial.should_prune():
-                        process.terminate()
-                        try:
-                            process.wait(timeout=30)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                        stdout_file.close()
-                        raise optuna.TrialPruned(
-                            f"Pruned at iter {target_iter} with PSNR {psnr_val:.2f}"
-                        )
+                    if not multi_objective:
+                        trial.report(psnr_val, step=report_step - 1)
+                        if trial.should_prune():
+                            process.terminate()
+                            try:
+                                process.wait(timeout=30)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                            stdout_file.close()
+                            raise optuna.TrialPruned(
+                                f"Pruned at iter {target_iter} with PSNR {psnr_val:.2f}"
+                            )
                 else:
                     break
 
