@@ -72,15 +72,15 @@ def suggest_params(trial, base_config):
 
 
 def read_metrics(metrics_path):
-    """Read metrics.json, returning dict of {iteration: avg_psnr}."""
+    """Read metrics.json, returning list of metric entries."""
     if not os.path.exists(metrics_path):
-        return {}
+        return []
     try:
         with open(metrics_path, 'r') as f:
             data = json.load(f)
-        return {e["iteration"]: e["avg_psnr"] for e in data.get("metrics", [])}
+        return data.get("metrics", [])
     except (json.JSONDecodeError, KeyError):
-        return {}
+        return []
 
 
 def read_final_metrics(metrics_path):
@@ -98,6 +98,35 @@ def read_final_metrics(metrics_path):
     except (json.JSONDecodeError, KeyError):
         pass
     return None, None
+
+
+def read_last_line(file_path):
+    """Read the last line of a file efficiently, handling carriage returns from tqdm."""
+    if not os.path.exists(file_path):
+        return ""
+    try:
+        with open(file_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            curr_pos = f.tell()
+            if curr_pos == 0:
+                return ""
+            
+            # Read a chunk from the end to find the latest update
+            read_size = min(curr_pos, 2048)
+            f.seek(curr_pos - read_size)
+            chunk = f.read(read_size).decode(errors='ignore')
+            
+            # tqdm uses \r to update the same line; log files preserve these.
+            # We want the text after the very last \r or \n.
+            import re
+            lines = re.split(r'[\r\n]', chunk)
+            # Filter out empty strings and return the last non-empty one
+            for line in reversed(lines):
+                if line.strip():
+                    return line.strip()
+            return ""
+    except Exception:
+        return ""
 
 
 def objective(trial, args, base_config, multi_objective=False):
@@ -132,9 +161,20 @@ def objective(trial, args, base_config, multi_objective=False):
             retcode = process.poll()
 
             # Read intermediate metrics
-            psnr_by_iter = read_metrics(metrics_path)
+            metrics = read_metrics(metrics_path)
+            if metrics:
+                last_m = metrics[-1]
+                trial.set_user_attr("cur_iter", last_m["iteration"])
+                trial.set_user_attr("cur_psnr", round(last_m["avg_psnr"], 4))
+                trial.set_user_attr("cur_gaussians", last_m.get("num_gaussians", 0))
+
+            # Update dashboard with last log line
+            last_log = read_last_line(stdout_path)
+            if last_log:
+                trial.set_user_attr("last_log", last_log)
 
             # Report at checkpoint iterations (single-objective only)
+            psnr_by_iter = {m["iteration"]: m["avg_psnr"] for m in metrics}
             while report_step < len(REPORT_ITERS):
                 target_iter = REPORT_ITERS[report_step]
                 if target_iter in psnr_by_iter:
