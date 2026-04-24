@@ -64,7 +64,7 @@ def suggest_params(trial, base_config):
     config["iterations"] = trial.suggest_int("iterations", 20000, 45000, step=5000)
 
     # Derived params (must stay consistent)
-    config["rvq_iter"] = max(config["iterations"] - 2000, config["densify_until_iter"] + 1000)
+    config["rvq_iter"] = max(config["iterations"] - 6000, config["densify_until_iter"] + 1000)
     n_steps = max(4, config["iterations"] // 5000)
     config["net_lr_step"] = [int(config["iterations"] * (i + 1) / (n_steps + 1)) for i in range(n_steps)]
 
