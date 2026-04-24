@@ -40,21 +40,21 @@ def suggest_params(trial, base_config):
     config["mask_lr"] = trial.suggest_float("mask_lr", 0.003, 0.02, log=True)
 
     # Densification
-    config["densify_grad_threshold"] = trial.suggest_float("densify_grad_threshold", 0.00003, 0.0005, log=True)
-    config["gnumlimit"] = trial.suggest_int("gnumlimit", 300000, 3000000, step=100000)
-    config["densify_until_iter"] = trial.suggest_int("densify_until_iter", 10000, 30000, step=1000)
-    config["desicnt"] = trial.suggest_int("desicnt", 6, 18, step=3)
+    config["densify_grad_threshold"] = trial.suggest_float("densify_grad_threshold", 0.0001, 0.0005, log=True)
+    config["gnumlimit"] = trial.suggest_int("gnumlimit", 300000, 2000000, step=100000)
+    config["densify_until_iter"] = trial.suggest_int("densify_until_iter", 7000, 15000, step=1000)
+    config["desicnt"] = trial.suggest_int("desicnt", 3, 12, step=3)
 
     # Pruning and masking
     config["lambda_mask"] = trial.suggest_float("lambda_mask", 0.0002, 0.005, log=True)
-    config["mask_prune_iter"] = trial.suggest_int("mask_prune_iter", 500, 2000, step=500)
+    config["mask_prune_iter"] = trial.suggest_int("mask_prune_iter", 500, 2000, step=250)
     config["lambda_dssim"] = trial.suggest_float("lambda_dssim", 0.1, 0.4)
 
     # EMS (error-guided multiview sampling)
-    config["emsstart"] = trial.suggest_int("emsstart", 6000, 20000, step=1000)
+    config["emsstart"] = trial.suggest_int("emsstart", 1000, 10000, step=1000)
 
     # Model capacity
-    config["max_hashmap"] = trial.suggest_int("max_hashmap", 14, 18)
+    config["max_hashmap"] = trial.suggest_int("max_hashmap", 14, 17)
     config["rvq_size_geo"] = trial.suggest_categorical("rvq_size_geo", [256, 512, 1024])
     config["rvq_size_temp"] = trial.suggest_categorical("rvq_size_temp", [256, 512, 1024])
     config["rvq_num_geo"] = trial.suggest_int("rvq_num_geo", 3, 5)
