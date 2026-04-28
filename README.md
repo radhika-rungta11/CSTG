@@ -119,6 +119,57 @@ python test.py --quiet --eval --skip_train --valloader colmapvalid --configpath 
 python test.py --quiet --eval --skip_train --valloader technicolorvalid --configpath configs/techni_ours/<scene>.json --model_path <path to model>
 ```
 
+### Floater Filter (post-training, optional)
+
+Use the GT depth maps as a geometric oracle to prune mid-air "floater" Gaussians from a trained model. Each Gaussian center is projected into every training camera; Gaussians that sit significantly in front of the GT surface, or that project into sky pixels while at scene-realistic depth, are flagged and removed. The script decodes the Huffman+RVQ compressed `_pp.npz`, subsets all per-Gaussian arrays consistently, and re-encodes — so the downstream `parser.py` works unchanged on the filtered output.
+
+**Prerequisites**: `pre_n3d.py` must have been run with depth maps present at `<scene>/cam_*/depth/<frame>.{exr,jpg,png}`; it forwards them into `colmap_<t>/depth/<cam_name>.{exr,jpg,png}`, where the filter reads them. EXR is preferred for full float-precision depth (e.g. Blender's Z-pass).
+
+```bash
+# Filter the latest iteration's _pp.npz; writes to point_cloud/iteration_<N>_filtered/
+python script/depth_filter.py --model log/ours_cook_spinach --source <location>/cook_spinach/colmap_0
+
+# Then re-package the filtered model
+python script/parser.py \
+    --input log/ours_cook_spinach/point_cloud/iteration_25000_filtered/point_cloud_pp.npz \
+    --output log/ours_cook_spinach_filtered.4dgs.gz
+```
+
+Always start with `--dry-run` to see the floater-score distribution and choose thresholds before writing.
+
+**Single-frame (static scene, default)**:
+```bash
+python script/depth_filter.py --model log/<run> --source <scene>/colmap_0 --dry-run
+```
+
+**Multi-frame (dynamic scene)** — evaluates the per-Gaussian motion polynomial at each frame, weights contributions by trbf temporal activity, and reads `<scene>/colmap_<t>/depth/` for each `t`. The number of training frames must match `--duration`:
+```bash
+python script/depth_filter.py --model log/<run> --source <scene>/colmap_0 --duration 50 --dry-run
+```
+
+#### Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--model` | required | Path to model dir, e.g. `log/ours_cook_spinach`. Latest iteration in `point_cloud/` is used unless `--iteration` is given. |
+| `--source` | required | Path to COLMAP data dir, e.g. `<scene>/colmap_0`. Provides camera poses + GT depth (multi-frame walks `colmap_<t>/` siblings). |
+| `--threshold` | `0.5` | Floater-score cutoff. Prune if Gaussian is "in front of surface" (or in sky) in more than this fraction of views. Lower = more aggressive. |
+| `--in-front` | `1.0` | Meters by which Gaussian's camera-space `z` must be less than the GT surface depth to count as in-front-of-surface in that view. Tighten (e.g. `0.05`) to catch sub-meter floaters near foliage edges. |
+| `--min-views` | `3` | Auto-prune Gaussians visible in fewer than this many cameras (likely outliers). |
+| `--opacity-min` | off | If set (e.g. `0.05`), additionally drop Gaussians whose `sigmoid(_opacity)` is below this. Targets translucent ghosts. |
+| `--iteration` | latest | Specific iteration folder to filter, e.g. `25000`. Defaults to the highest `iteration_<N>` present. |
+| `--dry-run` | off | Compute and report stats only; don't write the filtered npz. |
+| `--duration` | `1` | Number of trained frames. >1 enables multi-frame mode (motion polynomial + per-frame depth). |
+| `--uniform-time` | off | Multi-frame only: weight every (Gaussian, frame) pair equally instead of by trbf temporal activity. |
+| `--min-weight` | `0.05` | Multi-frame only: skip frames where a Gaussian's trbf activity weight is below this. |
+
+#### Tuning notes
+
+- **Default `--threshold 0.5 --in-front 1.0`** is conservative — drops mostly outliers and obvious mid-air ghosts.
+- **`--threshold 0.3 --in-front 0.05`** is aggressive — recommended for tree/foliage scenes where floaters can sit close to legitimate geometry.
+- The filter catches mid-air floaters (geometric ghosts) and sky-region floaters (Gaussians projecting into sky pixels at scene-realistic depth). It does **not** catch wrong-color Gaussians sitting on real surfaces — those need a different filter (per-view RGB consistency).
+- A `filter_meta.npz` is saved next to the filtered `_pp.npz` containing `floater_score`, `in_view`, `sky_count`, and `keep_mask` arrays for downstream inspection.
+
 ### Exporting to binary format
 
 Convert a trained `_pp.npz` checkpoint to a C-friendly binary format (`.4dgs.gz`) with baked `features_dc`:
@@ -222,6 +273,7 @@ Use `configs/custom_default.json` as a starting point. Set `duration` to your fr
 | `script/extract_frames.py` | Standalone frame extraction from `Cam_N.mp4` videos |
 | `script/convert_to_jpeg.py` | Batch-convert PNG images to JPEG in `cam_*/` folders |
 | `script/parser.py` | Convert `_pp.npz` checkpoint to `.4dgs.gz` binary format |
+| `script/depth_filter.py` | Post-training floater filter using GT depth maps as a geometric oracle (single + multi-frame) |
 | `script/optuna_tuner.py` | Optuna hyperparameter tuner (single or multi-objective) |
 | `script/post.py` | Post-processing utilities (video generation, metrics) |
 | `script/setup.sh` | Environment setup script |
