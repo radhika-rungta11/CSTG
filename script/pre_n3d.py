@@ -59,15 +59,20 @@ def extractframes(videopath, startframe=0, endframe=300, fmt="jpg", quality=95):
     cam.release()
 
 
-def resolveframepath(camfolder, frame_idx):
+def resolveframepath(camfolder, frame_idx, subfolder=""):
     """Find the image for frame_idx, supporting plain (0.ext) or zero-padded (00000.ext) naming."""
     names = [str(frame_idx)] + [str(frame_idx).zfill(pad) for pad in range(2, 7)]
-    for name in names:
-        for ext in SUPPORTED_EXTS:
-            path = os.path.join(camfolder, name + ext)
-            if os.path.exists(path):
-                return path
-    raise FileNotFoundError(f"No image for frame {frame_idx} in {camfolder}")
+    for sub in [subfolder, "rgb"]: # fallback to rgb for new flamsplat structure
+        if sub:
+            search_folder = os.path.join(camfolder, sub)
+        else:
+            search_folder = camfolder
+        for name in names:
+            for ext in SUPPORTED_EXTS:
+                path = os.path.join(search_folder, name + ext)
+                if os.path.exists(path):
+                    return path
+    raise FileNotFoundError(f"No image for frame {frame_idx} in {camfolder} (with subfolder={subfolder})")
 
 
 def preparecolmapdynerf(folder, offset=0):
@@ -75,14 +80,39 @@ def preparecolmapdynerf(folder, offset=0):
     savedir = os.path.join(folder, "colmap_" + str(offset))
     if not os.path.exists(savedir):
         os.mkdir(savedir)
-    savedir = os.path.join(savedir, "input")
-    if not os.path.exists(savedir):
-        os.mkdir(savedir)
+    savedir_input = os.path.join(savedir, "input")
+    if not os.path.exists(savedir_input):
+        os.mkdir(savedir_input)
+    savedir_depth = os.path.join(savedir, "depth")
+    if not os.path.exists(savedir_depth):
+        os.mkdir(savedir_depth)
+        
     for camfolder in folderlist:
         imagepath = resolveframepath(camfolder, offset)
         src_ext = os.path.splitext(imagepath)[1]
-        imagesavepath = os.path.join(savedir, camfolder.split("/")[-2] + src_ext)
+        cam_name = camfolder.split("/")[-2]
+        imagesavepath = os.path.join(savedir_input, cam_name + src_ext)
         shutil.copy(imagepath, imagesavepath)
+        
+        # Look up depth map directly in cam_xxx/depth/ (do NOT use resolveframepath,
+        # which falls back to rgb/ and would silently return RGB as depth).
+        depth_names = [str(offset)] + [str(offset).zfill(pad) for pad in range(2, 7)]
+        depth_path = None
+        depth_dir = os.path.join(camfolder, "depth")
+        if os.path.isdir(depth_dir):
+            for name in depth_names:
+                for depth_ext_try in (".exr", ".jpg", ".png"):
+                    candidate = os.path.join(depth_dir, name + depth_ext_try)
+                    if os.path.exists(candidate):
+                        depth_path = candidate
+                        break
+                if depth_path is not None:
+                    break
+        
+        if depth_path and os.path.exists(depth_path):
+            depth_ext = os.path.splitext(depth_path)[1]
+            depthsavepath = os.path.join(savedir_depth, cam_name + depth_ext)
+            shutil.copy(depth_path, depthsavepath)
 
 
 def getcampaths(path):
