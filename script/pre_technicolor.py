@@ -33,6 +33,7 @@ import natsort
 import struct
 import pickle
 import csv
+import json
 import sys
 import argparse
 from PIL import Image
@@ -45,25 +46,68 @@ sys.path.append(".")
     
 
 
-def updatetechnicamerasindb(dbfile, videopath, manualfolder):
-    """After feature_extractor, update cameras with Technicolor intrinsics and write manual/ files.
-    Uses positional matching: DB images sorted by name map 1-to-1 to cameras_parameters.txt rows."""
-    camparam_path = os.path.join(videopath, "cameras_parameters.txt")
-    camparams = []
+def _parse_camparams(camparam_path):
+    """Parse cameras_parameters.txt, returning a list of float-column rows.
+    Tolerates an optional leading non-numeric column (e.g. cam_name written by
+    flamsplat) and skips comment / header lines.
+
+    A valid data row must have at least 12 numeric columns:
+    fx cx cy _ _ qw qx qy qz tx ty tz. Rows shorter than that are treated as
+    headers and skipped (e.g. the original Technicolor 5-col header line).
+    """
+    out = []
     with open(camparam_path, "r") as f:
         reader = csv.reader(f, delimiter=" ")
-        for lineidx, row in enumerate(reader):
-            if lineidx == 0:
-                continue  # skip header line
-            row = [float(c) for c in row if c.strip() != '']
-            camparams.append(row)
+        for row in reader:
+            cells = [c for c in row if c.strip() != ""]
+            if not cells:
+                continue
+            if cells[0].startswith("#"):
+                continue
+            # If the first cell isn't a number (e.g. 'cam001'), drop it.
+            try:
+                float(cells[0])
+            except ValueError:
+                cells = cells[1:]
+            try:
+                nums = [float(c) for c in cells]
+            except ValueError:
+                continue
+            if len(nums) < 12:
+                # Header row (e.g. Technicolor's 5-col first line); skip.
+                continue
+            out.append(nums)
+    return out
+
+
+def updatetechnicamerasindb(dbfile, videopath, manualfolder, width=None, height=None):
+    """After feature_extractor, update cameras with Technicolor intrinsics and write manual/ files.
+    Uses positional matching: DB images sorted by name map 1-to-1 to cameras_parameters.txt rows.
+
+    If width/height are not given, falls back to scene_meta.json, then to the original
+    Technicolor hard-coded resolution (2048x1088)."""
+    camparam_path = os.path.join(videopath, "cameras_parameters.txt")
+    camparams = _parse_camparams(camparam_path)
 
     con = sqlite3.connect(dbfile)
     rows = con.execute("SELECT image_id, name, camera_id FROM images ORDER BY name").fetchall()
 
     imagetxtlist = []
     cameratxtlist = []
-    W, H = 2048, 1088
+
+    # Resolve W,H precedence: caller arg > scene_meta.json > legacy default.
+    if width is None or height is None:
+        meta_path = os.path.join(videopath, "scene_meta.json")
+        if os.path.exists(meta_path):
+            with open(meta_path) as f:
+                meta = json.load(f)
+            if width is None:
+                width = int(meta["width"])
+            if height is None:
+                height = int(meta["height"])
+    if width is None or height is None:
+        width, height = 2048, 1088
+    W, H = int(width), int(height)
 
     for db_idx, (image_id, imgname, camera_id) in enumerate(rows):
         if db_idx >= len(camparams):
@@ -104,7 +148,7 @@ def updatetechnicamerasindb(dbfile, videopath, manualfolder):
         pass
 
 
-def getcolmapsingletechni_v2(videopath, offset):
+def getcolmapsingletechni_v2(videopath, offset, width=None, height=None):
     """COLMAP 3.13-compatible pipeline for Technicolor datasets.
     delete DB → feature_extractor → update cameras + write manual/ → exhaustive_matcher
     → point_triangulator → image_undistorter → move sparse/0."""
@@ -128,7 +172,7 @@ def getcolmapsingletechni_v2(videopath, offset):
         exit(exit_code)
 
     # Update cameras with known intrinsics + write manual/ with actual DB image IDs
-    updatetechnicamerasindb(dbfile, videopath, manualfolder)
+    updatetechnicamerasindb(dbfile, videopath, manualfolder, width=width, height=height)
 
     featurematcher = f"colmap exhaustive_matcher --database_path {dbfile}"
     exit_code = os.system(featurematcher)
@@ -170,6 +214,76 @@ def getcolmapsingletechni_v2(videopath, offset):
 
 
 
+
+
+RGB_EXTS = (".png", ".jpg", ".jpeg")
+
+
+def imagecopy_from_flamsplat(base_dir, frame_indices):
+    """Map flamsplat's per-camera layout into Technicolor's per-frame layout.
+
+    Source:  base_dir/cam_NNN/rgb/FFFFF.{png,jpg,jpeg}  and  base_dir/cam_NNN/depth/FFFFF.exr
+    Target:  base_dir/colmap_<idx>/input/camNNN.<ext>   and  base_dir/colmap_<idx>/depth/camNNN.exr
+
+    The output image extension is preserved from the source (so PNG stays PNG,
+    JPEG stays JPEG). COLMAP and the Technicolor reader both handle either.
+
+    `frame_indices` is the list of source frame indices to use, one per output
+    `colmap_<idx>` (idx = position in the list). The cam_NNN -> camNNN rename
+    drops the underscore so that the substring "cam10" no longer aliases cam100..109
+    in the Technicolor reader's holdout logic.
+    """
+    cam_dirs = sorted(glob.glob(os.path.join(base_dir, "cam_*")))
+    if not cam_dirs:
+        raise RuntimeError(f"No cam_* directories found in {base_dir}")
+
+    for idx, frame in enumerate(frame_indices):
+        target_input = os.path.join(base_dir, f"colmap_{idx}", "input")
+        target_depth = os.path.join(base_dir, f"colmap_{idx}", "depth")
+        os.makedirs(target_input, exist_ok=True)
+        os.makedirs(target_depth, exist_ok=True)
+
+        for cam_dir in cam_dirs:
+            cam_name = os.path.basename(cam_dir.rstrip("/"))  # cam_NNN
+            try:
+                cam_num = int(cam_name.split("_")[1])
+            except (IndexError, ValueError):
+                # Skip non-cam dirs that might match cam_*
+                continue
+            new_name = f"cam{cam_num:03d}"
+
+            # RGB — try PNG / JPG / JPEG with several pad widths; preserve ext.
+            rgb_src = None
+            for pad in (5, 4, 3, 2, 1):
+                stem = str(frame).zfill(pad)
+                for ext in RGB_EXTS:
+                    cand = os.path.join(cam_dir, "rgb", stem + ext)
+                    if os.path.exists(cand):
+                        rgb_src = cand
+                        break
+                if rgb_src is not None:
+                    break
+            if rgb_src is None:
+                raise FileNotFoundError(
+                    f"No RGB ({'/'.join(RGB_EXTS)}) for frame {frame} in {cam_dir}/rgb/"
+                )
+            src_ext = os.path.splitext(rgb_src)[1]
+            shutil.copy(rgb_src, os.path.join(target_input, new_name + src_ext))
+
+            # Depth (optional)
+            depth_dir = os.path.join(cam_dir, "depth")
+            if os.path.isdir(depth_dir):
+                for pad in (5, 4, 3, 2, 1):
+                    for ext in (".exr", ".png", ".jpg"):
+                        cand = os.path.join(depth_dir, str(frame).zfill(pad) + ext)
+                        if os.path.exists(cand):
+                            shutil.copy(
+                                cand, os.path.join(target_depth, new_name + ext)
+                            )
+                            break
+                    else:
+                        continue
+                    break
 
 
 def imagecopy(video, offsetlist=[0],focalscale=1.0, fixfocal=None):
@@ -246,39 +360,77 @@ def fixbroken(imagepath, refimagepath):
 
 
 if __name__ == "__main__" :
-    scenenamelist = ["Train"]
-    framerangedict = {}
-    framerangedict["Birthday"] = [_ for _ in range(151, 201)] # start from 1
-    framerangedict["Fabien"] = [_ for _ in range(51, 101)] # start from 1
-    framerangedict["Painter"] = [_ for _ in range(100, 150)] # start from 0
-    framerangedict["Theater"] = [_ for _ in range(51, 101)] # start from 1
-    framerangedict["Train"] = [_ for _ in range(151, 201)] # start from 1
-    
-    parser = argparse.ArgumentParser()
+    # Hard-coded ranges used by the original Technicolor scenes.
+    framerangedict = {
+        "Birthday": list(range(151, 201)),
+        "Fabien":   list(range(51, 101)),
+        "Painter":  list(range(100, 150)),
+        "Theater":  list(range(51, 101)),
+        "Train":    list(range(151, 201)),
+    }
 
-    parser.add_argument("--videopath", default="", type=str)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--videopath", required=True, type=str)
+    parser.add_argument(
+        "--format",
+        choices=("technicolor", "flamsplat"),
+        default="technicolor",
+        help="technicolor: original Technicolor scenes (flat *_undist_FFFFF_CC.png at root). "
+             "flamsplat: synthetic scenes rendered by script/flamsplat.py "
+             "(per-camera cam_NNN/rgb/FFFFF.png + cam_NNN/depth/FFFFF.exr).",
+    )
+    parser.add_argument("--width", type=int, default=None,
+                        help="Image width in pixels. If unset, read from scene_meta.json.")
+    parser.add_argument("--height", type=int, default=None,
+                        help="Image height in pixels. If unset, read from scene_meta.json.")
+    parser.add_argument("--num_frames", type=int, default=None,
+                        help="flamsplat only: number of frames to process (overrides scene_meta.json).")
+    parser.add_argument("--start_offset", type=int, default=0,
+                        help="flamsplat only: source frame index of the first colmap_0 (default 0).")
     args = parser.parse_args()
 
-    
-
-
     videopath = args.videopath
-
     if not videopath.endswith("/"):
         videopath = videopath + "/"
-    
-    srcscene = videopath.split("/")[-2]
-    srcscene = srcscene[0].upper() + srcscene[1:]  # normalize to Title case
-    print("srcscene", srcscene)
 
-    if srcscene == "Birthday":
-        print("check broken")
-        fixbroken(videopath + "Birthday_undist_00173_09.png", videopath + "Birthday_undist_00172_09.png")
-        
-    imagecopy(videopath, offsetlist=framerangedict[srcscene])
+    # Resolve width/height from scene_meta.json if available (flamsplat writes it).
+    width, height = args.width, args.height
+    meta_path = os.path.join(videopath, "scene_meta.json")
+    if (width is None or height is None) and os.path.exists(meta_path):
+        with open(meta_path) as f:
+            meta = json.load(f)
+        if width is None:
+            width = int(meta["width"])
+        if height is None:
+            height = int(meta["height"])
 
-    for offset in tqdm.tqdm(range(0, 50)):
-        getcolmapsingletechni_v2(videopath, offset=offset)
+    if args.format == "flamsplat":
+        # Determine frame indices
+        num_frames = args.num_frames
+        if num_frames is None and os.path.exists(meta_path):
+            with open(meta_path) as f:
+                num_frames = int(json.load(f)["frame_count"])
+        if num_frames is None:
+            raise SystemExit("--num_frames required (or write scene_meta.json with frame_count)")
+        frame_indices = [args.start_offset + i for i in range(num_frames)]
+
+        print(f"flamsplat mode: {num_frames} frames, {width}x{height}")
+        imagecopy_from_flamsplat(videopath, frame_indices)
+        for offset in tqdm.tqdm(range(num_frames)):
+            getcolmapsingletechni_v2(videopath, offset=offset, width=width, height=height)
+    else:
+        srcscene = videopath.split("/")[-2]
+        srcscene = srcscene[0].upper() + srcscene[1:]
+        print("srcscene", srcscene)
+
+        if srcscene == "Birthday":
+            print("check broken")
+            fixbroken(videopath + "Birthday_undist_00173_09.png",
+                      videopath + "Birthday_undist_00172_09.png")
+
+        imagecopy(videopath, offsetlist=framerangedict[srcscene])
+        for offset in tqdm.tqdm(range(0, 50)):
+            getcolmapsingletechni_v2(videopath, offset=offset, width=width, height=height)
 
     #  rm -r colmap_* # once meet error, delete all colmap_* folders and rerun this script.
 

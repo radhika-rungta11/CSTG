@@ -56,8 +56,13 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.veryrify_llff = 0
         self.eval = False
-        self.model = "gmodel" # 
+        self.model = "gmodel" #
         self.loader = "colmap" #
+        # Technicolor reader: which camera to hold out as test set when eval=True.
+        # Default "cam10" preserves the original Technicolor split.
+        # Use "stride" (or empty/None) to hold out every llffhold-th unique camera —
+        # appropriate for synthetic 360 rigs with many cameras and no fixed test cam.
+        self.holdout_cam = "cam10"
         
         self.max_hashmap = 14
         self.rvq_size_geo = 256

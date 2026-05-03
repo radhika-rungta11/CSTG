@@ -50,7 +50,11 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, multiview, duration=duration)
         
         elif loader == "technicolor" or loader == "technicolorvalid" :
-            scene_info = sceneLoadTypeCallbacks["Technicolor"](args.source_path, args.images, args.eval, multiview, duration=duration)
+            holdout = getattr(args, "holdout_cam", "cam10")
+            scene_info = sceneLoadTypeCallbacks["Technicolor"](
+                args.source_path, args.images, args.eval,
+                multiview=multiview, duration=duration, holdout_cam=holdout,
+            )
         
         elif loader == "immersive" or loader == "immersivevalid" or loader == "immersivess"  :
             scene_info = sceneLoadTypeCallbacks["Immersive"](args.source_path, args.images, args.eval, multiview, duration=duration)

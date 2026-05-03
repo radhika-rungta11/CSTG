@@ -46,6 +46,27 @@ python script/extract_frames.py <input_dir> --format jpg --jpeg-quality 95
 ```
 Extracts `Cam_N.mp4` videos into `cam_NNN/NNNNN.jpg` folder structure. Supports `--format png` for lossless output.
 
+#### Synthetic scenes (Blender → Technicolor)
+
+For synthetic scenes rendered with `script/flamsplat.py` (Blender add-on), prefer the Technicolor format over N3D — it carries per-camera intrinsics + principal-point offsets and skips the LLFF/poses_bounds round-trip, which fits 360° spherical camera shells better than the forward-facing LLFF assumption.
+
+1. In Blender, run the Flamsplat panel: pick a target object, generate the camera shell, set "Export Format" to **Technicolor**, then *Render All* and *Export Technicolor*. This produces:
+    - `cam_NNN/rgb/FFFFF.png` and `cam_NNN/depth/FFFFF.exr` per camera
+    - `cameras_parameters.txt` (per-camera fx/cx/cy + qw qx qy qz tx ty tz, COLMAP convention)
+    - `scene_meta.json` (resolution + frame count, used by the preprocessor)
+2. Run the Technicolor preprocessor in flamsplat mode:
+    ```bash
+    python script/pre_technicolor.py --videopath <scene> --format flamsplat
+    ```
+    Width/height/frame-count come from `scene_meta.json`; override with `--width`, `--height`, `--num_frames` if needed. Depth maps are forwarded to `colmap_<t>/depth/camNNN.exr` so `script/depth_filter.py` keeps working.
+3. Train using a Technicolor config. Copy `configs/techni_custom/template.json` to `configs/techni_custom/<scene>.json`, set `duration` to your frame count, and pick a `holdout_cam`:
+    - `"holdout_cam": "stride"` → hold out every 8th camera (good for dense 360 rigs)
+    - `"holdout_cam": "cam060"` → hold out a specific camera by exact name
+    ```bash
+    python train.py --eval --configpath configs/techni_custom/<scene>.json \
+        --model_path log/<scene> --source_path <scene>/colmap_0 --comp --store_npz
+    ```
+
 ## Running
 
 ### Training

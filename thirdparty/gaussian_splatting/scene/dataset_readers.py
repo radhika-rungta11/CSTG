@@ -840,7 +840,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duratio
 
 
 
-def readColmapSceneInfoTechnicolor(path, images, eval, llffhold=8, multiview=False, duration=50):
+def readColmapSceneInfoTechnicolor(path, images, eval, llffhold=8, multiview=False, duration=50, holdout_cam="cam10"):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -871,20 +871,27 @@ def readColmapSceneInfoTechnicolor(path, images, eval, llffhold=8, multiview=Fal
     #     print(cam_info.uid, cam_info.R, cam_info.T, cam_info.FovY, cam_info.image_name)
 
     if eval:
-        train_cam_infos = [_ for _ in cam_infos if "cam10" not in _.image_name]
-        test_cam_infos = [_ for _ in cam_infos if "cam10" in _.image_name]
-        uniquecheck = []
-        for cam_info in test_cam_infos:
-            if cam_info.image_name not in uniquecheck:
-                uniquecheck.append(cam_info.image_name)
-        assert len(uniquecheck) == 1 
-        
-        sanitycheck = []
-        for cam_info in train_cam_infos:
-            if cam_info.image_name not in sanitycheck:
-                sanitycheck.append(cam_info.image_name)
-        for testname in uniquecheck:
-            assert testname not in sanitycheck
+        if holdout_cam in (None, "", "stride"):
+            # LLFF-style stride: every llffhold-th unique camera is held out as test.
+            unique_names = []
+            for ci in cam_infos:
+                if ci.image_name not in unique_names:
+                    unique_names.append(ci.image_name)
+            test_names = set(unique_names[::llffhold])
+            train_cam_infos = [c for c in cam_infos if c.image_name not in test_names]
+            test_cam_infos = [c for c in cam_infos if c.image_name in test_names]
+            assert len(test_cam_infos) >= 1, "stride holdout produced no test cameras"
+        else:
+            # Exact-match holdout (image_name is the COLMAP image basename without ext).
+            # Substring matching used to alias e.g. "cam10" with cam100..109 — fixed here.
+            train_cam_infos = [c for c in cam_infos if c.image_name != holdout_cam]
+            test_cam_infos = [c for c in cam_infos if c.image_name == holdout_cam]
+            assert len(test_cam_infos) >= 1, (
+                f"holdout_cam '{holdout_cam}' did not match any image_name; "
+                f"available examples: {[c.image_name for c in cam_infos[:5]]}"
+            )
+            sanity = {c.image_name for c in train_cam_infos}
+            assert holdout_cam not in sanity
     else:
         train_cam_infos = cam_infos
         test_cam_infos = cam_infos[:4]
