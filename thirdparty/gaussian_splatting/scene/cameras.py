@@ -45,9 +45,11 @@ class Camera(nn.Module):
         # image is real image
         if not isinstance(image, tuple):
             if "camera_" not in image_name:
-                self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
+                # uint8 storage: 4x less RAM than float32; use get_gt_image() to read.
+                image.clamp_(0.0, 1.0).mul_(255.0)
+                self.original_image = image.to(torch.uint8).to(self.data_device)
             else:
-                self.original_image = image.clamp(0.0, 1.0).half().to(self.data_device)
+                self.original_image = image.clamp_(0.0, 1.0).half().to(self.data_device)
             self.image_width = self.original_image.shape[2]
             self.image_height = self.original_image.shape[1]
             if gt_alpha_mask is not None:
@@ -112,6 +114,11 @@ class Camera(nn.Module):
             self.rayo = None
             self.rayd = None
 
+    def get_gt_image(self):
+        img = self.original_image.cuda(non_blocking=True)
+        if img.dtype == torch.uint8:
+            return img.float() / 255.0
+        return img.float()
 
 
 class MiniCam:
@@ -152,19 +159,20 @@ class Camerass(nn.Module):
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
 
-        # image is real image 
+        # image is real image
         if not isinstance(image, tuple):
             if "camera_" not in image_name:
-                self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
+                image.clamp_(0.0, 1.0).mul_(255.0)
+                self.original_image = image.to(torch.uint8).to(self.data_device)
             else:
-                self.original_image = image.clamp(0.0, 1.0).half().to(self.data_device)
+                self.original_image = image.clamp_(0.0, 1.0).half().to(self.data_device)
             print("read one")# lazy loader?
             self.image_width = self.original_image.shape[2]
             self.image_height = self.original_image.shape[1]
 
         else:
-            self.image_width = image[0] 
-            self.image_height = image[1] 
+            self.image_width = image[0]
+            self.image_height = image[1]
             self.original_image = None
         
         self.image_width = 2 * self.image_width

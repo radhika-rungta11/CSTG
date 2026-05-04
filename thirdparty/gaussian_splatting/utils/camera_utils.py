@@ -42,6 +42,7 @@ def loadCam(args, id, cam_info, resolution_scale):
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
     resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+    cam_info.image.close()  # release decoded PIL pixels; Camera holds the tensor
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
@@ -87,6 +88,7 @@ def loadCamv2(args, id, cam_info, resolution_scale):
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
     resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+    cam_info.image.close()  # release decoded PIL pixels; Camera holds the tensor
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
@@ -135,6 +137,7 @@ def loadCamv2timing(args, id, cam_info, resolution_scale):
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
     resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+    cam_info.image.close()  # release decoded PIL pixels; Camera holds the tensor
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
@@ -182,6 +185,7 @@ def loadCamv2ss(args, id, cam_info, resolution_scale):
     resolution = (int(orig_w / 2), int(orig_h / 2))
 
     resized_image_rgb = PILtoTorch(cam_info.image, resolution) # hard coded half resolution
+    cam_info.image.close()  # release decoded PIL pixels; Camera holds the tensor
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None

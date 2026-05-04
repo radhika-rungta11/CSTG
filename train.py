@@ -47,9 +47,6 @@ from thirdparty.gaussian_splatting.helper3dg import getparser, getrenderparts
 
 
 def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration=50, rgbfunction="rgbv1", rdpip="v2", comp=False, store_npz=False):
-    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
-        cfg_log_f.write(str(Namespace(**vars(args))))
-
     first_iter = 0
     # Resume from checkpoint if requested
     resume_flag, resume_flagems, resume_emscnt, resume_lasterems = 0, 0, 0, 0
@@ -60,6 +57,10 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
         ckpt_to_load = find_latest_checkpoint(dataset.model_path)
         if ckpt_to_load is None:
             print("No checkpoint found, starting from scratch.")
+
+    if not ckpt_to_load:
+        with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+            cfg_log_f.write(str(Namespace(**vars(args))))
 
     render, GRsetting, GRzer = getrenderpip(rdpip)
 
@@ -113,19 +114,14 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
-    viewpoint_stack = None
     ema_loss_for_log = 0.0
-    #if freeze != 1:
-    first_iter = 0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
     flag = resume_flag
-    flagtwo = 0
-    depthdict = {}
 
     if opt.batch > 1:
-        traincameralist = scene.getTrainCameras().copy()
+        traincameralist = scene.getTrainCameras()
         traincamdict = {}
         for i in range(duration): # 0 to 4, -> (0.0, to 0.8)
             traincamdict[i] = [cam for cam in traincameralist if cam.timestamp == i/duration]
@@ -221,7 +217,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
                 render_pkg = render(viewpoint_cam, gaussians, pipe, background,  override_color=None,  basicfunction=rbfbasefunction, GRsetting=GRsetting, GRzer=GRzer, rvq_iter=(iteration > opt.rvq_iter))
                 image, viewspace_point_tensor, visibility_filter, radii = getrenderparts(render_pkg)
-                gt_image = viewpoint_cam.original_image.float().cuda()
+                gt_image = viewpoint_cam.get_gt_image()
 
                 if random_background:
                     gt_alpha = viewpoint_cam.gt_alpha_mask
@@ -246,10 +242,9 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                 cam_loss_window[viewpoint_cam.image_name].append(loss.item())
 
                 with torch.no_grad():
-                    psnr_val = psnr(image.unsqueeze(0), gt_image.unsqueeze(0)).mean().item()
-                    ssim_val = ssim(image.detach(), gt_image.detach()).item()
-                psnr_window.append(psnr_val)
-                ssim_window.append(ssim_val)
+                    psnr_window.append(psnr(image.unsqueeze(0), gt_image.unsqueeze(0)).mean().item())
+                    if iteration % 10 == 0:
+                        ssim_window.append(ssim(image.detach(), gt_image.detach()).item())
                 loss_window.append(loss.item())
 
                 if flagems == 1:
@@ -474,7 +469,7 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                         "iteration": iteration,
                         "avg_loss": round(sum(loss_window) / len(loss_window), 6),
                         "avg_psnr": round(sum(psnr_window) / len(psnr_window), 4),
-                        "avg_ssim": round(sum(ssim_window) / len(ssim_window), 6),
+                        "avg_ssim": round(sum(ssim_window) / len(ssim_window), 6) if ssim_window else 0.0,
                         "num_gaussians": gaussians.get_xyz.shape[0]
                     })
                     psnr_window.clear()

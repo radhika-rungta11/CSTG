@@ -123,7 +123,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         renderingpkg = render(view, gaussians, pipeline, background, scaling_modifier=1.0, basicfunction=rbfbasefunction,  GRsetting=GRsetting, GRzer=GRzer) # C x H x W
         rendering = renderingpkg["render"]
         rendering = torch.clamp(rendering, 0, 1.0)
-        gt = view.original_image[0:3, :, :].cuda().float()
+        gt = view.get_gt_image()[0:3, :, :]
         ssims.append(ssim(rendering.unsqueeze(0),gt.unsqueeze(0))) 
 
         psnrs.append(psnr(rendering.unsqueeze(0), gt.unsqueeze(0)))
