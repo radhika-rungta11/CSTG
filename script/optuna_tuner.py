@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
 """Optuna hyperparameter tuner for CSTG training.
 
-Runs Bayesian optimization over training config parameters, using PSNR as the
-objective. Reads intermediate metrics from metrics.json (written by train.py)
-and prunes underperforming trials early.
+Three modes:
+  default              single-objective: maximize training-window PSNR
+                       (cheap, prunes weak trials early via MedianPruner)
+  --multi_objective    Pareto: maximize training-window PSNR vs minimize Gaussian count
+                       (compactness trade-off)
+  --quality_objective  Pareto on held-out test cameras: PSNR + SSIM + LPIPS
+                       (3 objectives, no early pruning, runs test.py per trial)
+
+The quality_objective mode is the right one when you actually care about
+generalization quality and don't want PSNR-only to mislead — train.py only
+writes train-view PSNR/SSIM, so we run test.py post-training to get held-out
+PSNR/SSIM/LPIPS-Alex.
 
 Usage:
     python script/optuna_tuner.py \
-        --source_path data/leopard_run/colmap_0 \
-        --base_config configs/n3d_ours/leopard_ours_v33.json \
+        --source_path data/tree_tech/colmap_0 \
+        --base_config configs/techni_custom/tree_tech.json \
         --n_trials 20 \
-        --study_name leopard_tuning \
-        --output_dir log/optuna_runs
+        --study_name tree_tech_quality \
+        --output_dir log/optuna_runs \
+        --quality_objective
 """
 
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -24,6 +35,13 @@ import time
 import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
+
+# Map training loader name -> matching test.py --valloader name.
+_VALLOADER = {
+    "colmap": "colmapvalid",
+    "technicolor": "technicolorvalid",
+    "immersive": "immersivevalid",
+}
 
 # Iterations at which we report intermediate PSNR to Optuna for pruning
 REPORT_ITERS = [1000, 3000, 5000, 8000, 12000]
@@ -67,6 +85,9 @@ def suggest_params(trial, base_config):
     config["rvq_iter"] = max(config["iterations"] - 6000, config["densify_until_iter"] + 1000)
     n_steps = max(4, config["iterations"] // 5000)
     config["net_lr_step"] = [int(config["iterations"] * (i + 1) / (n_steps + 1)) for i in range(n_steps)]
+    # test.py reads test_iteration from the config and looks for
+    # point_cloud/iteration_<N>/point_cloud.ply — must match the swept iters.
+    config["test_iteration"] = config["iterations"]
 
     return config
 
@@ -129,7 +150,57 @@ def read_last_line(file_path):
         return ""
 
 
-def objective(trial, args, base_config, multi_objective=False):
+def run_test_and_read_metrics(trial_dir, source_path, config_path, base_config):
+    """Run test.py on a freshly-trained model, then read held-out PSNR/SSIM/LPIPS.
+
+    Returns (psnr, ssim, lpips_alex) or None on failure.
+    """
+    loader = base_config.get("loader", "colmap")
+    valloader = _VALLOADER.get(loader)
+    if valloader is None:
+        raise ValueError(f"Unknown loader '{loader}'; cannot pick valloader for test.py")
+
+    cmd = [
+        sys.executable, "test.py",
+        "--quiet", "--eval", "--skip_train",
+        "--valloader", valloader,
+        "--configpath", config_path,
+        "--model_path", trial_dir,
+        "--source_path", source_path,
+        "--test_iteration", "-1",  # auto-resolve to latest saved iteration
+    ]
+    test_log = os.path.join(trial_dir, "test_stdout.log")
+    with open(test_log, "w") as lf:
+        ret = subprocess.call(cmd, stdout=lf, stderr=subprocess.STDOUT)
+    if ret != 0:
+        print(f"  test.py failed (exit {ret}); see {test_log}")
+        return None
+
+    # test.py writes <model>/<iteration>_runtimeresults.json — pick the latest iter.
+    candidates = sorted(
+        glob.glob(os.path.join(trial_dir, "*_runtimeresults.json")),
+        key=lambda p: int(os.path.basename(p).split("_")[0]),
+    )
+    if not candidates:
+        print(f"  no *_runtimeresults.json found in {trial_dir}")
+        return None
+    with open(candidates[-1]) as f:
+        data = json.load(f)
+    # Structure: { model_path: { iteration_str: { "PSNR":..., "SSIM":..., "LPIPS":..., ... } } }
+    try:
+        inner = next(iter(data.values()))
+        iter_block = next(iter(inner.values()))
+        return (
+            float(iter_block["PSNR"]),
+            float(iter_block["SSIM"]),
+            float(iter_block["LPIPS"]),
+        )
+    except (StopIteration, KeyError, ValueError) as e:
+        print(f"  could not parse test metrics from {candidates[-1]}: {e}")
+        return None
+
+
+def objective(trial, args, base_config, multi_objective=False, quality_objective=False):
     trial_dir = os.path.join(args.output_dir, args.study_name, f"trial_{trial.number:03d}")
     os.makedirs(trial_dir, exist_ok=True)
 
@@ -182,7 +253,7 @@ def objective(trial, args, base_config, multi_objective=False):
                     last_psnr = psnr_val
                     report_step += 1
 
-                    if not multi_objective:
+                    if not multi_objective and not quality_objective:
                         trial.report(psnr_val, step=report_step - 1)
                         if trial.should_prune():
                             process.terminate()
@@ -217,7 +288,18 @@ def objective(trial, args, base_config, multi_objective=False):
         stdout_file.close()
         raise
 
-    # Read final metrics
+    # Quality-objective mode: run test.py for held-out PSNR/SSIM/LPIPS.
+    if quality_objective:
+        result = run_test_and_read_metrics(trial_dir, args.source_path, config_path, base_config)
+        if result is None:
+            raise optuna.TrialPruned("test.py failed or produced no metrics")
+        psnr_t, ssim_t, lpips_t = result
+        trial.set_user_attr("test_psnr", round(psnr_t, 4))
+        trial.set_user_attr("test_ssim", round(ssim_t, 6))
+        trial.set_user_attr("test_lpips", round(lpips_t, 6))
+        return psnr_t, ssim_t, lpips_t
+
+    # Read final metrics (training-window)
     final_psnr, final_gaussians = read_final_metrics(metrics_path)
     if final_psnr is not None:
         if multi_objective:
@@ -246,8 +328,14 @@ def main():
     parser.add_argument("--study_name", default="cstg_tuning", help="Optuna study name (used for DB filename)")
     parser.add_argument("--output_dir", default="log/optuna_runs", help="Directory for trial outputs")
     parser.add_argument("--timeout", type=int, default=None, help="Total study timeout in seconds")
-    parser.add_argument("--multi_objective", action="store_true", help="Maximize PSNR while minimizing gaussian count")
+    parser.add_argument("--multi_objective", action="store_true", help="Maximize PSNR while minimizing gaussian count (compactness Pareto)")
+    parser.add_argument("--quality_objective", action="store_true",
+                        help="Pareto over held-out test metrics: maximize PSNR + SSIM, minimize LPIPS-Alex. "
+                             "Runs test.py per trial, no early pruning.")
     args = parser.parse_args()
+
+    if args.multi_objective and args.quality_objective:
+        parser.error("--multi_objective and --quality_objective are mutually exclusive")
 
     with open(args.base_config) as f:
         base_config = json.load(f)
@@ -258,7 +346,16 @@ def main():
 
     sampler = TPESampler(seed=42, n_startup_trials=5)
 
-    if args.multi_objective:
+    if args.quality_objective:
+        # Held-out PSNR ↑, SSIM ↑, LPIPS ↓. Pareto front, no pruner.
+        study = optuna.create_study(
+            study_name=args.study_name,
+            storage=storage,
+            load_if_exists=True,
+            directions=["maximize", "maximize", "minimize"],
+            sampler=sampler,
+        )
+    elif args.multi_objective:
         # Multi-objective: no pruner (not supported), Pareto front
         study = optuna.create_study(
             study_name=args.study_name,
@@ -281,7 +378,12 @@ def main():
             sampler=sampler,
         )
 
-    mode = "multi-objective (PSNR + gaussian count)" if args.multi_objective else "single-objective (PSNR)"
+    if args.quality_objective:
+        mode = "quality multi-objective (test PSNR + SSIM + LPIPS)"
+    elif args.multi_objective:
+        mode = "multi-objective (PSNR + gaussian count)"
+    else:
+        mode = "single-objective (PSNR)"
     print(f"Starting Optuna study: {args.study_name}")
     print(f"  Mode: {mode}")
     print(f"  Base config: {args.base_config}")
@@ -292,7 +394,11 @@ def main():
     print()
 
     study.optimize(
-        lambda trial: objective(trial, args, base_config, multi_objective=args.multi_objective),
+        lambda trial: objective(
+            trial, args, base_config,
+            multi_objective=args.multi_objective,
+            quality_objective=args.quality_objective,
+        ),
         n_trials=args.n_trials,
         timeout=args.timeout,
         catch=(Exception,),
@@ -307,7 +413,11 @@ def main():
     print(f"  Pruned: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}")
     print(f"  Failed: {len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])}")
 
-    if args.multi_objective:
+    if args.quality_objective:
+        print(f"\nPareto front ({len(study.best_trials)} trials):")
+        for t in study.best_trials:
+            print(f"  Trial #{t.number}: PSNR={t.values[0]:.4f}  SSIM={t.values[1]:.4f}  LPIPS={t.values[2]:.4f}")
+    elif args.multi_objective:
         print(f"\nPareto front ({len(study.best_trials)} trials):")
         for t in study.best_trials:
             print(f"  Trial #{t.number}: PSNR={t.values[0]:.4f}, Gaussians={int(t.values[1]):,}")
@@ -315,7 +425,9 @@ def main():
         print(f"\nBest trial: #{study.best_trial.number}")
         print(f"Best PSNR: {study.best_value:.4f}")
     print(f"Best params:")
-    best_trial = study.best_trials[0] if args.multi_objective else study.best_trial
+    best_trial = (study.best_trials[0]
+                  if (args.multi_objective or args.quality_objective)
+                  else study.best_trial)
     for k, v in best_trial.params.items():
         print(f"  {k}: {v}")
 
