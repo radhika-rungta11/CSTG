@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import importlib.util
+import json
 import os
 import sys
 
@@ -81,9 +82,26 @@ def load_cameras(colmap_path):
     return cams
 
 
-def load_depth(colmap_path, image_name):
+def _find_scene_meta(source_path):
+    """Look for scene_meta.json in the source dir or its parent.
+
+    flamsplat writes scene_meta.json at the dataset root. depth_filter is
+    typically invoked with --source <dataset>/colmap_0, so we check both.
+    """
+    parent = os.path.dirname(os.path.abspath(source_path).rstrip("/"))
+    for c in (
+        os.path.join(source_path, "scene_meta.json"),
+        os.path.join(parent, "scene_meta.json"),
+    ):
+        if os.path.exists(c):
+            with open(c) as f:
+                return json.load(f)
+    return None
+
+
+def load_depth(colmap_path, image_name, depth_near=0.0, depth_far=None):
     base = os.path.splitext(image_name)[0]
-    for ext in (".exr", ".jpg", ".png"):
+    for ext in (".exr", ".png", ".jpg"):
         p = os.path.join(colmap_path, "depth", base + ext)
         if os.path.exists(p):
             img = cv2.imread(p, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
@@ -91,6 +109,19 @@ def load_depth(colmap_path, image_name):
                 return None
             if img.ndim == 3:
                 img = img[:, :, 0]
+            # PNG-16 ticks → meters: flamsplat encodes
+            #   pixel = ((z - near) / (far - near)) * 65535
+            # so the decode is z = near + (pixel/65535) * (far - near).
+            # EXR / 32-bit float images are already in meters.
+            if img.dtype == np.uint16:
+                if depth_far is None:
+                    raise RuntimeError(
+                        f"{p}: 16-bit PNG depth needs depth_far. Pass --depth-far "
+                        f"or place scene_meta.json with 'depth_far' near --source."
+                    )
+                near_f = float(depth_near)
+                span = float(depth_far) - near_f
+                return near_f + (img.astype(np.float32) / 65535.0) * span
             return img.astype(np.float32)
     return None
 
@@ -141,7 +172,8 @@ def compute_floater_scores(xyz, cams, source_path,
                            in_front_threshold=1.0,
                            valid_min=0.05, valid_max=100.0,
                            scene_z_max=100.0,
-                           min_weight=0.05, time_weighted=True):
+                           min_weight=0.05, time_weighted=True,
+                           depth_near=0.0, depth_far=None):
     """For each Gaussian center, score = fraction of views where the Gaussian
     is either (a) significantly in front of the GT surface, OR (b) projects
     into a sky pixel while sitting at scene-realistic depth (mid-air floater
@@ -192,7 +224,8 @@ def compute_floater_scores(xyz, cams, source_path,
             frame_dir = source_path
 
         for ci, (cam_name, cam) in enumerate(cams.items()):
-            depth = load_depth(frame_dir, cam["image_name"])
+            depth = load_depth(frame_dir, cam["image_name"],
+                               depth_near=depth_near, depth_far=depth_far)
             if depth is None:
                 continue
             if depth.shape != (cam["H"], cam["W"]):
@@ -326,7 +359,31 @@ def main():
     ap.add_argument("--min-weight", type=float, default=0.05,
                     help="Multi-frame only: skip frames where Gaussian's trbf activity "
                          "weight is below this (default 0.05).")
+    ap.add_argument("--depth-far", type=float, default=None,
+                    help="Far-clip in meters used to scale 16-bit PNG depth back to "
+                         "meters. Auto-discovered from scene_meta.json (next to --source "
+                         "or its parent) if not set. Ignored for EXR/float depth inputs.")
+    ap.add_argument("--depth-near", type=float, default=None,
+                    help="Near-clip in meters paired with --depth-far for the inverse "
+                         "of flamsplat's PNG-16 encoding. Auto-discovered from "
+                         "scene_meta.json. Defaults to 0.0 if missing.")
     args = ap.parse_args()
+
+    # Resolve depth_near/far for uint16 PNG depth (no-op for float/EXR inputs).
+    depth_far = args.depth_far
+    depth_near = args.depth_near
+    if depth_far is None or depth_near is None:
+        meta = _find_scene_meta(args.source)
+        if meta:
+            if depth_far is None and "depth_far" in meta:
+                depth_far = float(meta["depth_far"])
+            if depth_near is None and "depth_near" in meta:
+                depth_near = float(meta["depth_near"])
+            if depth_far is not None or depth_near is not None:
+                print(f"Auto-detected depth_near={depth_near} depth_far={depth_far}"
+                      f" from scene_meta.json")
+    if depth_near is None:
+        depth_near = 0.0
 
     # Locate _pp.npz
     pc_dir = os.path.join(args.model, "point_cloud")
@@ -380,7 +437,8 @@ def main():
         xyz, cams, args.source,
         motion=motion, tcen=tcen, tsca=tsca, duration=args.duration,
         in_front_threshold=args.in_front,
-        min_weight=args.min_weight, time_weighted=not args.uniform_time)
+        min_weight=args.min_weight, time_weighted=not args.uniform_time,
+        depth_near=depth_near, depth_far=depth_far)
 
     # Stats
     print("\nFloater-score distribution:")
