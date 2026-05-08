@@ -124,16 +124,32 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         rendering = renderingpkg["render"]
         rendering = torch.clamp(rendering, 0, 1.0)
         gt = view.get_gt_image()[0:3, :, :]
-        ssims.append(ssim(rendering.unsqueeze(0),gt.unsqueeze(0))) 
 
-        psnrs.append(psnr(rendering.unsqueeze(0), gt.unsqueeze(0)))
-        lpipss.append(lpips(rendering.unsqueeze(0), gt.unsqueeze(0), net_type='alex')) #
-        lpipssvggs.append( lpips(rendering.unsqueeze(0), gt.unsqueeze(0), net_type='vgg'))
+        # Masked metrics: when the camera has a gt_alpha_mask, evaluate only on
+        # subject pixels. Otherwise (non-masked scenes) compute on full frame.
+        # Makes optuna's quality_objective fair to alpha-loss-trained models
+        # that intentionally output black bg.
+        mask_uint8 = getattr(view, "gt_alpha_mask", None)
+        if mask_uint8 is not None:
+            mask_f = mask_uint8.cuda().float() / 255.0
+            if mask_f.shape[0] == 1 and rendering.shape[0] != 1:
+                mask_f = mask_f.expand_as(rendering)
+            r_eval = rendering * mask_f
+            g_eval = gt * mask_f
+        else:
+            r_eval = rendering
+            g_eval = gt
 
-        rendernumpy = rendering.permute(1,2,0).detach().cpu().numpy()
-        gtnumpy = gt.permute(1,2,0).detach().cpu().numpy()
-        
-        ssimv2 =  sk_ssim(rendernumpy, gtnumpy, channel_axis=2, data_range=1.0)
+        ssims.append(ssim(r_eval.unsqueeze(0),g_eval.unsqueeze(0)))
+
+        psnrs.append(psnr(r_eval.unsqueeze(0), g_eval.unsqueeze(0)))
+        lpipss.append(lpips(r_eval.unsqueeze(0), g_eval.unsqueeze(0), net_type='alex'))
+        lpipssvggs.append(lpips(r_eval.unsqueeze(0), g_eval.unsqueeze(0), net_type='vgg'))
+
+        rendernumpy = r_eval.permute(1,2,0).detach().cpu().numpy()
+        gtnumpy = g_eval.permute(1,2,0).detach().cpu().numpy()
+
+        ssimv2 = sk_ssim(rendernumpy, gtnumpy, channel_axis=2, data_range=1.0)
         ssimsv2.append(ssimv2)
 
 

@@ -270,7 +270,7 @@ def imagecopy_from_flamsplat(base_dir, frame_indices):
             src_ext = os.path.splitext(rgb_src)[1]
             shutil.copy(rgb_src, os.path.join(target_input, new_name + src_ext))
 
-            # Depth (optional)
+            # Depth (optional, legacy — older flamsplat scenes)
             depth_dir = os.path.join(cam_dir, "depth")
             if os.path.isdir(depth_dir):
                 for pad in (5, 4, 3, 2, 1):
@@ -279,6 +279,26 @@ def imagecopy_from_flamsplat(base_dir, frame_indices):
                         if os.path.exists(cand):
                             shutil.copy(
                                 cand, os.path.join(target_depth, new_name + ext)
+                            )
+                            break
+                    else:
+                        continue
+                    break
+
+            # Mask (optional, used by alpha-loss training).
+            # Mirrors the depth block: walk pad widths × extensions, copy with
+            # the camNNN basename so it sits next to colmap_<idx>/images/camNNN.<ext>.
+            mask_dir_src = os.path.join(cam_dir, "mask")
+            if os.path.isdir(mask_dir_src):
+                target_mask_dir = os.path.join(base_dir, f"colmap_{idx}", "mask")
+                os.makedirs(target_mask_dir, exist_ok=True)
+                for pad in (5, 4, 3, 2, 1):
+                    stem = str(frame).zfill(pad)
+                    for ext in (".png", ".jpg", ".jpeg"):
+                        cand = os.path.join(mask_dir_src, stem + ext)
+                        if os.path.exists(cand):
+                            shutil.copy(
+                                cand, os.path.join(target_mask_dir, new_name + ext)
                             )
                             break
                     else:
