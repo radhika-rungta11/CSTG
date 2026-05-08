@@ -68,6 +68,12 @@ def suggest_params(trial, base_config):
     config["mask_prune_iter"] = trial.suggest_int("mask_prune_iter", 500, 2000, step=250)
     config["lambda_dssim"] = trial.suggest_float("lambda_dssim", 0.1, 0.4)
 
+    # Alpha (silhouette) loss weight — only meaningful when the scene has masks.
+    # If lambda_alpha is not in the base config (non-masked scene), this overrides
+    # to a non-zero value but the loss in train.py silently skips when
+    # gt_alpha_mask is None, so it's safe to always sweep.
+    config["lambda_alpha"] = trial.suggest_float("lambda_alpha", 0.1, 1.0)
+
     # EMS (error-guided multiview sampling)
     config["emsstart"] = trial.suggest_int("emsstart", 1000, 10000, step=1000)
 

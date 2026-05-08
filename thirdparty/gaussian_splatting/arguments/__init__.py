@@ -106,6 +106,7 @@ class OptimizationParams(ParamGroup):
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
+        self.lambda_alpha = 0.0  # alpha/silhouette loss weight; needs gt_alpha_mask. ~0.5 typical for human-centric.
         self.densification_interval = 100
         self.opacity_reset_interval = 3_000
         self.opacity_reset_at = 10000

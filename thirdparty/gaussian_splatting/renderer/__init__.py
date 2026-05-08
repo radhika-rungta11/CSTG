@@ -30,7 +30,7 @@ from scene.oursfull import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.graphics_utils import getProjectionMatrixCV, focal2fov, fov2focal
 
-def train_ours_full(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, basicfunction = None, GRsetting=None, GRzer=None, rvq_iter=False):
+def train_ours_full(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, basicfunction = None, GRsetting=None, GRzer=None, rvq_iter=False, compute_alpha=False):
     """
     Render the scene. 
     
@@ -125,12 +125,51 @@ def train_ours_full(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch
 
     rendered_image = pc.rgbdecoder(rendered_image.unsqueeze(0), viewpoint_camera.rays, viewpoint_camera.timestamp) # 1 , 3
     rendered_image = rendered_image.squeeze(0)
+
+    rendered_alpha = None
+    if compute_alpha:
+        # Second rasterizer pass for accumulated alpha. Set every Gaussian's
+        # "color" to ones and bg to zero. The rasterizer's output channel value
+        # then equals  sum_i(opacity_i * T_{<i}) = 1 - T_final = alpha
+        # (alpha-blending identity, color-blind).
+        # Skip pc.rgbdecoder — it'd map 9-ch features → 3-ch RGB and corrupt alpha.
+        NUM_CH = colors_precomp.shape[1]
+        ones_colors = torch.ones((means3D.shape[0], NUM_CH),
+                                 device=means3D.device, dtype=colors_precomp.dtype)
+        zero_bg = torch.zeros(NUM_CH, device=means3D.device, dtype=bg_color.dtype)
+        raster_settings_alpha = GRsetting(
+            image_height=int(viewpoint_camera.image_height),
+            image_width=int(viewpoint_camera.image_width),
+            tanfovx=tanfovx, tanfovy=tanfovy,
+            bg=zero_bg,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewpoint_camera.world_view_transform,
+            projmatrix=viewpoint_camera.full_proj_transform,
+            sh_degree=pc.active_sh_degree,
+            campos=viewpoint_camera.camera_center,
+            prefiltered=False,
+        )
+        rasterizer_alpha = GRzer(raster_settings=raster_settings_alpha)
+        alpha_raw, _, _ = rasterizer_alpha(
+            means3D=means3D,
+            means2D=means2D,
+            shs=None,
+            colors_precomp=ones_colors,
+            opacities=opacity,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=cov3D_precomp,
+        )
+        # All channels equal alpha; take channel 0 → (1, H, W)
+        rendered_alpha = alpha_raw[0:1].clamp(0.0, 1.0)
+
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii,
             "opacity": opacity,
-            "depth": depth,}
+            "depth": depth,
+            "alpha": rendered_alpha,}
 
 
 def test_ours_full(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, basicfunction = None, GRsetting=None, GRzer=None):

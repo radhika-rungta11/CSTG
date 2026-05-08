@@ -10,14 +10,46 @@
 #
 
 from scene.cameras import Camera
-from scene.cameras import Camerass # ass 
+from scene.cameras import Camerass # ass
 import numpy as np
 
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
-import torch 
-import os 
+import torch
+import os
+from PIL import Image
 WARNED = False
+
+
+def _try_load_sidecar_mask(cam_info, resolution):
+    """Look for a per-camera mask at <colmap_dir>/mask/<image_basename>.<ext>
+    when the main image has no alpha channel. Used by loadCam / loadCamv2 for
+    masked-loss training on JPG datasets like NHR.
+
+    Returns a (1, H, W) float tensor in [0, 1], or None if no sidecar exists.
+    """
+    img_path = getattr(cam_info, "image_path", None)
+    if not img_path:
+        return None
+    img_dir = os.path.dirname(img_path)
+    if not img_dir:
+        return None
+    # Sibling "mask" dir next to "images". Tolerant to either layout.
+    mask_dir = os.path.join(os.path.dirname(img_dir), "mask")
+    if not os.path.isdir(mask_dir):
+        return None
+    base_no_ext = os.path.splitext(os.path.basename(img_path))[0]
+    src_ext = os.path.splitext(img_path)[1]
+    for ext in (src_ext, ".png", ".jpg", ".jpeg"):
+        cand = os.path.join(mask_dir, base_no_ext + ext)
+        if os.path.exists(cand):
+            with Image.open(cand) as m_pil:
+                m = PILtoTorch(m_pil.convert("L"), resolution)
+            # PILtoTorch returns (1, H, W) for L-mode; defensively reshape.
+            if m.dim() == 2:
+                m = m.unsqueeze(0)
+            return m[:1, ...]
+    return None
 
 def loadCam(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.image.size
@@ -48,6 +80,8 @@ def loadCam(args, id, cam_info, resolution_scale):
     loaded_mask = None
     if resized_image_rgb.shape[0] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
+    if loaded_mask is None:
+        loaded_mask = _try_load_sidecar_mask(cam_info, resolution)
 
     cameradirect = cam_info.hpdirecitons
     camerapose = cam_info.pose
@@ -95,6 +129,8 @@ def loadCamv2(args, id, cam_info, resolution_scale):
 
     if resized_image_rgb.shape[0] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
+    if loaded_mask is None:
+        loaded_mask = _try_load_sidecar_mask(cam_info, resolution)
 
     cameradirect = cam_info.hpdirecitons
     camerapose = cam_info.pose
@@ -144,6 +180,8 @@ def loadCamv2timing(args, id, cam_info, resolution_scale):
 
     if resized_image_rgb.shape[0] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
+    if loaded_mask is None:
+        loaded_mask = _try_load_sidecar_mask(cam_info, resolution)
 
     cameradirect = cam_info.hpdirecitons
     camerapose = cam_info.pose

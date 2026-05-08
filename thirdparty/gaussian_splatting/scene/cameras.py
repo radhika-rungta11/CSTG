@@ -53,7 +53,11 @@ class Camera(nn.Module):
             self.image_width = self.original_image.shape[2]
             self.image_height = self.original_image.shape[1]
             if gt_alpha_mask is not None:
-                self.gt_alpha_mask = gt_alpha_mask.to(self.data_device)
+                # uint8 storage: 4x less GPU RAM than float32 for what's
+                # effectively a binary mask. Decode at use time:
+                #   mask_float = self.gt_alpha_mask.float() / 255.0
+                gt_alpha_mask = gt_alpha_mask.clamp_(0.0, 1.0).mul_(255.0)
+                self.gt_alpha_mask = gt_alpha_mask.to(torch.uint8).to(self.data_device)
             else:
                 self.gt_alpha_mask = None
 

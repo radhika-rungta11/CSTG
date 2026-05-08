@@ -108,6 +108,10 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
     numchannel = 9
 
     random_background = getattr(dataset, 'random_background', False)
+    lambda_alpha = float(getattr(opt, 'lambda_alpha', 0.0))
+    alpha_loss_enabled = lambda_alpha > 0
+    if alpha_loss_enabled:
+        print(f"[alpha_loss] enabled — lambda_alpha={lambda_alpha} (extra render pass per iter).")
     bg_color = [1, 1, 1] if dataset.white_background else [0 for i in range(numchannel)]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -215,14 +219,18 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                     rand_rgb = torch.rand(3, device="cuda")
                     background = torch.cat([rand_rgb, torch.zeros(numchannel - 3, device="cuda")])
 
-                render_pkg = render(viewpoint_cam, gaussians, pipe, background,  override_color=None,  basicfunction=rbfbasefunction, GRsetting=GRsetting, GRzer=GRzer, rvq_iter=(iteration > opt.rvq_iter))
+                # Only do the alpha render pass if this cam has a mask;
+                # avoids ~2x compute waste on scenes/cameras without sidecar masks.
+                _do_alpha = alpha_loss_enabled and viewpoint_cam.gt_alpha_mask is not None
+                render_pkg = render(viewpoint_cam, gaussians, pipe, background,  override_color=None,  basicfunction=rbfbasefunction, GRsetting=GRsetting, GRzer=GRzer, rvq_iter=(iteration > opt.rvq_iter), compute_alpha=_do_alpha)
                 image, viewspace_point_tensor, visibility_filter, radii = getrenderparts(render_pkg)
                 gt_image = viewpoint_cam.get_gt_image()
 
                 if random_background:
                     gt_alpha = viewpoint_cam.gt_alpha_mask
                     if gt_alpha is not None:
-                        gt_alpha_cuda = (gt_alpha.cuda() > 0.99).float()  # binarize: exclude semi-transparent boundary fringe
+                        # uint8 mask -> [0, 1] float, then binarize.
+                        gt_alpha_cuda = (gt_alpha.cuda().float() / 255.0 > 0.99).float()
                         rand_rgb_3d = background[:3].view(3, 1, 1)
                         gt_image = gt_image * gt_alpha_cuda + rand_rgb_3d * (1.0 - gt_alpha_cuda)
 
@@ -238,6 +246,15 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
                 if ours:
                     loss += opt.lambda_mask*torch.mean((torch.sigmoid(gaussians._mask)))
+
+                # Alpha (silhouette) loss — color-blind constraint pushing
+                # rendered alpha toward the binary mask. Closes the
+                # color-camouflage loophole that mask-multiplied L1 has.
+                if alpha_loss_enabled and viewpoint_cam.gt_alpha_mask is not None:
+                    rendered_alpha = render_pkg.get("alpha")
+                    if rendered_alpha is not None:
+                        gt_mask_01 = viewpoint_cam.gt_alpha_mask.cuda().float() / 255.0
+                        loss = loss + lambda_alpha * l1_loss(rendered_alpha, gt_mask_01)
 
                 cam_loss_window[viewpoint_cam.image_name].append(loss.item())
 
