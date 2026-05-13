@@ -17,7 +17,8 @@ from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
 import torch
 import os
-from PIL import Image
+from PIL import Image, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True  # tolerate partially-corrupted JPEGs
 WARNED = False
 
 

@@ -224,6 +224,7 @@ def objective(trial, args, base_config, multi_objective=False, quality_objective
         "--model_path", trial_dir,
         "--source_path", args.source_path,
         "--comp", "--store_npz",
+        "--data_device", "cpu",
     ]
     stdout_path = os.path.join(trial_dir, "stdout.log")
     stdout_file = open(stdout_path, 'w')
