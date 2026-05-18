@@ -18,6 +18,7 @@ from utils.graphics_utils import fov2focal
 import torch
 import os
 from PIL import Image, ImageFile
+from tqdm import tqdm
 ImageFile.LOAD_TRUNCATED_IMAGES = True  # tolerate partially-corrupted JPEGs
 WARNED = False
 
@@ -288,30 +289,23 @@ def loadCamnogt(args, id, cam_info, resolution_scale):
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []
-
-    for id, c in enumerate(cam_infos):
+    for id, c in enumerate(tqdm(cam_infos, desc="Loading cams", unit="cam")):
         camera_list.append(loadCam(args, id, c, resolution_scale))
-
     return camera_list
 
 def cameraList_from_camInfosv2(cam_infos, resolution_scale, args, ss=False):
+    # tqdm writes to stderr → still visible under --quiet (which redirects stdout).
     camera_list = []
-
-    if not ss: #
-        for id, c in enumerate(cam_infos):
-            camera_list.append(loadCamv2(args, id, c, resolution_scale))
-    else:
-        for id, c in enumerate(cam_infos):
-            camera_list.append(loadCamv2ss(args, id, c, resolution_scale))
-            print("id", id)
-
+    loader = loadCamv2ss if ss else loadCamv2
+    for id, c in enumerate(tqdm(cam_infos, desc="Loading cams (v2)", unit="cam")):
+        camera_list.append(loader(args, id, c, resolution_scale))
     return camera_list
+
+
 def cameraList_from_camInfosv2nogt(cam_infos, resolution_scale, args):
     camera_list = []
-
-    for id, c in enumerate(cam_infos):
+    for id, c in enumerate(tqdm(cam_infos, desc="Loading cams (nogt)", unit="cam")):
         camera_list.append(loadCamnogt(args, id, c, resolution_scale))
-
     return camera_list
 
 def camera_to_JSON(id, camera : Camera):
