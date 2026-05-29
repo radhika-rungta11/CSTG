@@ -135,6 +135,23 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
         H,W = traincameralist[0].image_height, traincameralist[0].image_width
         gaussians.ts = torch.ones(1,1,H,W).cuda()
 
+    # MCMC schedule auto-scaling: defaults target a 30k-iter run, so rescale
+    # them linearly when opt.iterations differs — but only if all four knobs
+    # are still at their defaults (idempotent against explicit user overrides).
+    if opt.iterations != 30_000 and (
+            opt.mcmc_refine_start == 500
+            and opt.mcmc_refine_stop == 25_000
+            and opt.mcmc_noise_stop == 25_000
+            and opt.mcmc_refine_every == 100):
+        f = opt.iterations / 30_000.0
+        opt.mcmc_refine_start = int(opt.mcmc_refine_start * f)
+        opt.mcmc_refine_stop  = int(opt.mcmc_refine_stop  * f)
+        opt.mcmc_noise_stop   = int(opt.mcmc_noise_stop   * f)
+        opt.mcmc_refine_every = max(50, int(opt.mcmc_refine_every * f))
+    print(f"[mcmc] refine [{opt.mcmc_refine_start}, {opt.mcmc_refine_stop}] "
+          f"every {opt.mcmc_refine_every}; noise_stop={opt.mcmc_noise_stop}; "
+          f"cap_max={opt.mcmc_cap_max}; noise_lr={opt.mcmc_noise_lr}")
+
     scene.recordpoints(0, "start training")
 
                                                             
@@ -322,14 +339,12 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
 
 
 
-            # Densification and pruning here
-            
-            if iteration < opt.densify_until_iter and iteration < opt.iterations:
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-            else:
-                if ours and iteration % opt.mask_prune_iter == 0:
-                    gaussians.mask_prune()
+            # MCMC: mask_prune runs on its own cadence (was gated by the old
+            # heuristic densifier's densify_until_iter). max_radii2D / grad
+            # stats are no longer needed for MCMC, but the rasterizer still
+            # writes radii / visibility_filter so we leave them alone.
+            if ours and iteration % opt.mask_prune_iter == 0:
+                gaussians.mask_prune()
 
             flag = controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filter, radii, viewspace_point_tensor, flag,  traincamerawithdistance=None, maxbounds=maxbounds,minbounds=minbounds)
            
@@ -470,6 +485,17 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                     gaussians.optimizer_net.step()
                     gaussians.scheduler_net.step()
                     gaussians.optimizer_net.zero_grad(set_to_none = True)
+                # MCMC noise injection (off by default via mcmc_noise_lr=0).
+                if (ours and opt.mcmc_noise_lr > 0
+                        and iteration >= opt.mcmc_refine_start
+                        and iteration <= opt.mcmc_noise_stop):
+                    lr_xyz = 0.0
+                    for pg in gaussians.optimizer.param_groups:
+                        if pg["name"] == "xyz":
+                            lr_xyz = pg["lr"]
+                            break
+                    if lr_xyz > 0:
+                        gaussians._mcmc_noise(lr_xyz, opt.mcmc_noise_lr)
 
             # Write per-camera loss table row and metrics JSON every 100 iterations
             if iteration % 100 == 0:

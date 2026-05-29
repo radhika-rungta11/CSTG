@@ -57,11 +57,11 @@ def suggest_params(trial, base_config):
     config["opacity_lr"] = trial.suggest_float("opacity_lr", 0.01, 0.1, log=True)
     config["mask_lr"] = trial.suggest_float("mask_lr", 0.003, 0.02, log=True)
 
-    # Densification
-    config["densify_grad_threshold"] = trial.suggest_float("densify_grad_threshold", 0.0001, 0.0005, log=True)
-    config["gnumlimit"] = trial.suggest_int("gnumlimit", 300000, 2000000, step=100000)
-    config["densify_until_iter"] = trial.suggest_int("densify_until_iter", 7000, 15000, step=1000)
-    config["desicnt"] = trial.suggest_int("desicnt", 3, 12, step=3)
+    # Densification — MCMC (gsplat-style relocate / sample_add).
+    config["mcmc_cap_max"] = trial.suggest_int("mcmc_cap_max", 1_000_000, 5_000_000, step=500_000)
+    config["mcmc_noise_lr"] = trial.suggest_categorical("mcmc_noise_lr", [0.0, 1e3, 1e4, 5e4])
+    config["mcmc_refine_every"] = trial.suggest_int("mcmc_refine_every", 50, 300, step=50)
+    config["mcmc_min_opacity"] = trial.suggest_float("mcmc_min_opacity", 0.001, 0.05, log=True)
 
     # Pruning and masking
     config["lambda_mask"] = trial.suggest_float("lambda_mask", 0.0002, 0.005, log=True)
@@ -88,7 +88,10 @@ def suggest_params(trial, base_config):
     config["iterations"] = trial.suggest_int("iterations", 20000, 45000, step=5000)
 
     # Derived params (must stay consistent)
-    config["rvq_iter"] = max(config["iterations"] - 6000, config["densify_until_iter"] + 1000)
+    config["mcmc_refine_stop"] = int(config["iterations"] * 0.8)
+    config["mcmc_refine_start"] = max(500, int(config["iterations"] * 0.02))
+    config["mcmc_noise_stop"] = config["mcmc_refine_stop"]
+    config["rvq_iter"] = max(config["iterations"] - 6000, config["mcmc_refine_stop"] + 1000)
     n_steps = max(4, config["iterations"] // 5000)
     config["net_lr_step"] = [int(config["iterations"] * (i + 1) / (n_steps + 1)) for i in range(n_steps)]
     # test.py reads test_iteration from the config and looks for
@@ -441,7 +444,10 @@ def main():
     # Write best config
     best_config = dict(base_config)
     best_config.update(best_trial.params)
-    best_config["rvq_iter"] = max(best_config["iterations"] - 2000, best_config["densify_until_iter"] + 1000)
+    best_config["mcmc_refine_stop"] = int(best_config["iterations"] * 0.8)
+    best_config["mcmc_refine_start"] = max(500, int(best_config["iterations"] * 0.02))
+    best_config["mcmc_noise_stop"] = best_config["mcmc_refine_stop"]
+    best_config["rvq_iter"] = max(best_config["iterations"] - 2000, best_config["mcmc_refine_stop"] + 1000)
     n_steps = max(4, best_config["iterations"] // 5000)
     best_config["net_lr_step"] = [int(best_config["iterations"] * (i + 1) / (n_steps + 1)) for i in range(n_steps)]
 

@@ -31,6 +31,25 @@ from einops import reduce
 
 class GaussianModel:
 
+    # MCMC: (CSTG attribute name, optimizer param_group "name") for per-Gaussian
+    # Parameters managed by self.optimizer. optimizer_net (hashgrid + MLP) is
+    # NOT included — those params are not per-Gaussian and are unaffected by
+    # relocate/add. The decoder param_group is also excluded; it has multiple
+    # Parameters (rgbdecoder.parameters()) and is not per-Gaussian-sized.
+    _MCMC_PARAMS = [
+        ("_xyz",         "xyz"),
+        ("_opacity",     "opacity"),
+        ("_scaling",     "scaling"),
+        ("_rotation",    "rotation"),
+        ("_features_t",  "f_t"),
+        ("_trbf_center", "trbf_center"),
+        ("_trbf_scale",  "trbf_scale"),
+        ("_motion",      "motion"),
+        ("_omega",       "omega"),
+        ("_mask",        "mask"),
+    ]
+    _MCMC_BINOM_MAX = 51
+
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
@@ -961,7 +980,248 @@ class GaussianModel:
         prune_mask = (torch.sigmoid(self._mask) <= 0.01).squeeze()
         self.prune_points(prune_mask)
         torch.cuda.empty_cache()
-    
+
+    # ----------------------------------------------------------------------
+    # MCMC port (gsplat-style relocate / sample_add / inject_noise_to_position).
+    # See /workspace/Gsplat/gsplat/gsplat/strategy/ops.py for the reference.
+    # ----------------------------------------------------------------------
+    def _mcmc_group_index(self, group_name):
+        if getattr(self, "_mcmc_group_idx_cache", None) is None:
+            self._mcmc_group_idx_cache = {
+                g["name"]: i for i, g in enumerate(self.optimizer.param_groups)
+            }
+        return self._mcmc_group_idx_cache[group_name]
+
+    @torch.no_grad()
+    def _update_param_with_optimizer(self, param_fn, optimizer_fn, names=None):
+        """Re-wrap a set of per-Gaussian Parameters and rekey optimizer state.
+
+        Mirrors gsplat's _update_param_with_optimizer: param_fn must return a
+        new nn.Parameter; optimizer_fn transforms exp_avg / exp_avg_sq (and
+        any other non-'step' Adam buffer). The new Parameter replaces the old
+        in self.<attr> and in optimizer.param_groups[i]["params"]; optimizer
+        state is re-keyed under the new Parameter object.
+        """
+        iter_list = self._MCMC_PARAMS if names is None else \
+            [(a, g) for (a, g) in self._MCMC_PARAMS if a in names]
+        for attr, group_name in iter_list:
+            old_param = getattr(self, attr)
+            new_param = param_fn(attr, old_param)
+            assert isinstance(new_param, nn.Parameter), \
+                f"param_fn must return nn.Parameter for {attr}"
+            setattr(self, attr, new_param)
+            gi = self._mcmc_group_index(group_name)
+            old_state = self.optimizer.state.get(old_param, None)
+            if old_state is None:
+                self.optimizer.param_groups[gi]["params"] = [new_param]
+                continue
+            del self.optimizer.state[old_param]
+            for key in list(old_state.keys()):
+                if key != "step":
+                    old_state[key] = optimizer_fn(key, old_state[key])
+            self.optimizer.param_groups[gi]["params"] = [new_param]
+            self.optimizer.state[new_param] = old_state
+
+    def _ensure_mcmc_state(self):
+        if getattr(self, "_mcmc_binoms", None) is not None:
+            return
+        n_max = self._MCMC_BINOM_MAX
+        b = torch.zeros((n_max, n_max), dtype=torch.float32, device="cuda")
+        for n in range(n_max):
+            for k in range(n + 1):
+                b[n, k] = math.comb(n, k)
+        self._mcmc_binoms = b
+
+    @torch.no_grad()
+    def _compute_relocation(self, opacities, scales, ratios):
+        """Pure-PyTorch port of gsplat compute_relocation (Eq. 9 of MCMC paper).
+
+        opacities: (M,) in [0, 1]; scales: (M, 3) post-exp (not log-space);
+        ratios: (M,) int, the # of children per source. Returns
+        (new_opacities, new_scales) in the same spaces.
+        """
+        self._ensure_mcmc_state()
+        n_max = self._MCMC_BINOM_MAX
+        ratios = torch.clamp(ratios, min=1, max=n_max - 1).long()
+        a = opacities.clamp(1e-6, 1.0 - 1e-6)
+        N = ratios.float()
+        new_opacities = 1.0 - torch.pow(1.0 - a, 1.0 / N)
+        ks = torch.arange(1, n_max, device="cuda").float()
+        a_e = a.unsqueeze(1); N_e = N.unsqueeze(1); ks_e = ks.unsqueeze(0)
+        valid = (ks_e <= N_e).float()
+        bin_rows = self._mcmc_binoms[ratios][:, 1:]
+        # For k > N, log_terms = k*log(a) + (N-k)*log(1-a) — the (N-k) factor
+        # is negative, and with log(1-a) negative the term flips positive and
+        # can overflow exp. Even though bin_rows[k]=0 for k > N would make the
+        # contribution zero algebraically, 0 * +inf = NaN in IEEE float and
+        # the NaN propagates to new_scales, eventually crashing the rasterizer
+        # with an illegal memory access. Clamp from above too — exp(30) ≈ 1e13
+        # is well past anything that would matter, and bounded values keep
+        # 0 * x = 0 in the masked-out positions.
+        log_terms = (ks_e * torch.log(a_e) +
+                     (N_e - ks_e) * torch.log(1.0 - a_e)).clamp(min=-30.0, max=30.0)
+        powers = torch.exp(log_terms)
+        S = (bin_rows * powers * ks_e * valid).sum(dim=1).clamp(min=1e-12)
+        coef = new_opacities / torch.sqrt(S)
+        new_scales = scales * coef.unsqueeze(1)
+        return new_opacities, new_scales
+
+    @torch.no_grad()
+    def _mcmc_relocate(self, min_opacity):
+        if not torch.isfinite(self._opacity).all():
+            print("[mcmc] _mcmc_relocate: NaN/Inf in opacity — skip")
+            return 0
+        opacities = torch.sigmoid(self._opacity)
+        mask_alive = torch.sigmoid(self._mask)
+        # "Dead" = below opacity threshold OR mask-killed (scale*mask -> 0
+        # produces singular covariance in the rasterizer). Treat both as
+        # relocation targets so this single op replaces both reset_opacity
+        # and the explicit mask_prune from the heuristic densifier path.
+        dead_mask = ((opacities <= min_opacity) |
+                     (mask_alive <= 0.01)).squeeze(-1)
+        n = int(dead_mask.sum().item())
+        if n == 0:
+            return 0
+        alive_idx = (~dead_mask).nonzero(as_tuple=True)[0]
+        if alive_idx.numel() == 0:
+            return 0
+        dead_idx = dead_mask.nonzero(as_tuple=True)[0]
+        probs = opacities[alive_idx].flatten()
+        local = torch.multinomial(probs, n, replacement=True)
+        sampled_idx = alive_idx[local]
+
+        n_total = self._xyz.shape[0]
+        new_opacities, new_scales = self._compute_relocation(
+            opacities=opacities[sampled_idx].flatten(),
+            scales=torch.exp(self._scaling)[sampled_idx],
+            ratios=torch.bincount(sampled_idx, minlength=n_total)[sampled_idx] + 1,
+        )
+        eps = 1e-6
+        new_opacities = new_opacities.clamp(min=min_opacity, max=1.0 - eps)
+        new_opacities_logit = torch.logit(new_opacities).unsqueeze(-1)
+        new_scales_log = torch.log(new_scales)
+
+        def param_fn(attr, p):
+            if attr == "_opacity":
+                p[sampled_idx] = new_opacities_logit
+                p[dead_idx] = p[sampled_idx]
+            elif attr == "_scaling":
+                p[sampled_idx] = new_scales_log
+                p[dead_idx] = p[sampled_idx]
+            elif attr in ("_motion", "_omega"):
+                # Training-accumulated motion/omega are anchored to the source
+                # location. Carrying them to a teleported slot would produce
+                # wrong poly-displaced means3D. Reset to zero for relocated
+                # slots only; sources keep their values.
+                p[dead_idx] = 0
+            else:
+                p[dead_idx] = p[sampled_idx]
+            return nn.Parameter(p, requires_grad=p.requires_grad)
+
+        def optimizer_fn(key, v):
+            v[sampled_idx] = 0
+            v[dead_idx] = 0
+            return v
+
+        self._update_param_with_optimizer(param_fn, optimizer_fn)
+
+        # Non-optimizer per-Gaussian buffers: reset at the touched indices.
+        touched = torch.cat([sampled_idx, dead_idx]).unique()
+        if hasattr(self, "max_radii2D") and self.max_radii2D.numel() == self._xyz.shape[0]:
+            self.max_radii2D[touched] = 0
+        if hasattr(self, "xyz_gradient_accum") and self.xyz_gradient_accum.shape[0] == self._xyz.shape[0]:
+            self.xyz_gradient_accum[touched] = 0
+            self.denom[touched] = 0
+        return n
+
+    @torch.no_grad()
+    def _mcmc_add(self, cap_max, grow_factor=1.05, min_opacity=0.005):
+        if not torch.isfinite(self._opacity).all():
+            print("[mcmc] _mcmc_add: NaN/Inf — skip")
+            return 0
+        n_cur = self._xyz.shape[0]
+        n_target = min(int(cap_max), int(grow_factor * n_cur))
+        n_new = n_target - n_cur
+        if n_new <= 0:
+            return 0
+
+        opacities = torch.sigmoid(self._opacity)
+        mask_alive = torch.sigmoid(self._mask)
+        healthy = ((opacities > min_opacity) &
+                   (mask_alive > 0.01)).squeeze(-1)
+        healthy_idx = healthy.nonzero(as_tuple=True)[0]
+        if healthy_idx.numel() == 0:
+            return 0
+        probs = opacities[healthy_idx].flatten()
+        local = torch.multinomial(probs, n_new, replacement=True)
+        sampled_idx = healthy_idx[local]
+
+        new_opacities, new_scales = self._compute_relocation(
+            opacities=opacities[sampled_idx].flatten(),
+            scales=torch.exp(self._scaling)[sampled_idx],
+            ratios=torch.bincount(sampled_idx, minlength=n_cur)[sampled_idx] + 1,
+        )
+        eps = 1e-6
+        new_opacities = new_opacities.clamp(min=min_opacity, max=1.0 - eps)
+        new_opacities_logit = torch.logit(new_opacities).unsqueeze(-1)
+        new_scales_log = torch.log(new_scales)
+
+        def param_fn(attr, p):
+            if attr == "_opacity":
+                p[sampled_idx] = new_opacities_logit
+                extra = p[sampled_idx]
+            elif attr == "_scaling":
+                p[sampled_idx] = new_scales_log
+                extra = p[sampled_idx]
+            elif attr in ("_motion", "_omega"):
+                # New clones inherit none of the source's motion polynomial;
+                # let the optimizer regrow it from zero at the new location.
+                extra = torch.zeros_like(p[sampled_idx])
+            else:
+                extra = p[sampled_idx]
+            p_new = torch.cat([p, extra], dim=0)
+            return nn.Parameter(p_new, requires_grad=p.requires_grad)
+
+        def optimizer_fn(key, v):
+            v[sampled_idx] = 0
+            v_new = torch.zeros((n_new, *v.shape[1:]), device=v.device, dtype=v.dtype)
+            return torch.cat([v, v_new], dim=0)
+
+        self._update_param_with_optimizer(param_fn, optimizer_fn)
+
+        new_n = self._xyz.shape[0]
+        self.max_radii2D = torch.zeros((new_n,), device="cuda")
+        self.xyz_gradient_accum = torch.zeros((new_n, 1), device="cuda")
+        self.denom = torch.zeros((new_n, 1), device="cuda")
+        if self.omegamask is not None and self.omegamask.shape[0] != new_n:
+            self.omegamask = None
+        return n_new
+
+    @torch.no_grad()
+    def _mcmc_noise(self, lr_xyz, noise_lr):
+        if noise_lr <= 0 or self._xyz.shape[0] == 0:
+            return
+        if not torch.isfinite(self._opacity).all():
+            return
+        opacities = torch.sigmoid(self._opacity.flatten())
+        scales = torch.exp(self._scaling.clamp(max=2.0))
+        R = build_rotation(self._rotation)
+        covars = (R * scales.unsqueeze(1).pow(2)) @ R.transpose(1, 2)
+
+        def op_sigmoid(x, k=100.0, x0=0.995):
+            return 1.0 / (1.0 + torch.exp(-k * (x - x0)))
+        scaler = lr_xyz * noise_lr
+        noise = (torch.randn_like(self._xyz)
+                 * op_sigmoid(1 - opacities).unsqueeze(-1) * scaler)
+        noise = torch.einsum("bij,bj->bi", covars, noise)
+        noise = torch.nan_to_num(noise, nan=0.0, posinf=0.0, neginf=0.0)
+        # Clip per-step displacement to a fraction of scene extent to prevent
+        # low-opacity Gaussians from random-walking into the camera near-plane.
+        max_step = 0.05 * max(self.spatial_lr_scale, 1.0)
+        norm = torch.linalg.norm(noise, dim=-1, keepdim=True)
+        noise = noise * torch.clamp(max_step / norm.clamp(min=1e-12), max=1.0)
+        self._xyz.data.add_(noise)
+
     def final_prune(self, compress=False):
         self.mask_prune()
         # additional opacity prune for cleaner final result

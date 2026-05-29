@@ -147,107 +147,115 @@ def removeminmax(gaussians, maxbounds, minbounds):
     torch.cuda.empty_cache()
 
 
-def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filter, radii, viewspace_point_tensor, flag, traincamerawithdistance=None, maxbounds=None, minbounds=None): 
+def _mcmc_refine_step(opt, gaussians, iteration, scene):
+    """Run one MCMC refine step (relocate + sample_add) if it's a scheduled iter.
+
+    Replaces the heuristic densify_pruneclone + reset_opacity path. Returns the
+    pair (n_relocated, n_added) — both 0 if the step is skipped.
+    """
+    if (iteration < opt.mcmc_refine_start
+            or iteration > opt.mcmc_refine_stop
+            or iteration >= opt.iterations
+            or iteration % opt.mcmc_refine_every != 0):
+        return 0, 0
+    n_rel = gaussians._mcmc_relocate(opt.mcmc_min_opacity)
+    n_new = gaussians._mcmc_add(opt.mcmc_cap_max)
+    if n_rel or n_new:
+        scene.recordpoints(
+            iteration,
+            f"mcmc relocated={n_rel} added={n_new} total={gaussians.get_xyz.shape[0]}",
+        )
+        if os.environ.get("MCMC_SANITY") == "1":
+            _mcmc_sanity(gaussians, iteration)
+    return n_rel, n_new
+
+
+def _mcmc_sanity(g, it):
+    """Opt-in diagnostic (MCMC_SANITY=1). Verifies per-Gaussian tensor sizes,
+    optimizer-state alignment, and value finiteness after each refine. Adds a
+    full-tensor isfinite pass at 3M+ Gaussians, so it's off in production."""
+    n = g._xyz.shape[0]
+    bad = []
+    for attr, _ in g._MCMC_PARAMS:
+        p = getattr(g, attr)
+        if p.shape[0] != n:
+            bad.append(f"{attr} shape[0]={p.shape[0]} != {n}")
+        elif not torch.isfinite(p).all():
+            bad.append(f"{attr} has NaN/Inf")
+    for pg in g.optimizer.param_groups:
+        if pg["name"] not in {nm for _, nm in g._MCMC_PARAMS}:
+            continue
+        p = pg["params"][0]
+        attr = next(a for a, nm in g._MCMC_PARAMS if nm == pg["name"])
+        if p is not getattr(g, attr):
+            bad.append(f"opt group {pg['name']} param IS NOT model.{attr}")
+            continue
+        st = g.optimizer.state.get(p, None)
+        if st is not None:
+            for k in ("exp_avg", "exp_avg_sq"):
+                if k in st and st[k].shape != p.shape:
+                    bad.append(f"opt {pg['name']}.{k} shape={st[k].shape} != {p.shape}")
+    if bad:
+        print(f"[mcmc-sanity] iter={it}: " + "; ".join(bad), flush=True)
+
+
+def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filter, radii, viewspace_point_tensor, flag, traincamerawithdistance=None, maxbounds=None, minbounds=None):
     if densify == 1: # n3d
-        if iteration < opt.densify_until_iter :
+        if iteration < opt.mcmc_refine_stop:
             if iteration ==  8001 : # 8001
                 omegamask = gaussians.zero_omegabymotion() # 1 we keep omega, 0 we freeze omega
                 gaussians.omegamask  = omegamask
                 scene.recordpoints(iteration, "seperate omega"+str(torch.sum(omegamask).item()))
             elif iteration > 8001: # 8001
-                if gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
+                if gaussians.omegamask is None or gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
                     omegamask = gaussians.zero_omegabymotion()
                     gaussians.omegamask = omegamask
                     scene.recordpoints(iteration, "seperate omega"+str(torch.sum(omegamask).item()))
                 freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
                 rotationmask = torch.logical_not(gaussians.omegamask)
                 freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask)
-            if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                if flag < opt.desicnt:
-                    scene.recordpoints(iteration, "before densify")
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_pruneclone(opt.densify_grad_threshold, opt.opthr, scene.cameras_extent, size_threshold)
-                    flag+=1
-                    scene.recordpoints(iteration, "after densify")
-                else:
-                    if iteration < 7000 : # defalt 7000. 
-                        prune_mask =  (gaussians.get_opacity < opt.opthr).squeeze()
-                        gaussians.prune_points(prune_mask)
-                        torch.cuda.empty_cache()
-                        scene.recordpoints(iteration, "addionally prune_mask")
-            if iteration % 3000 == 0 :
-                gaussians.reset_opacity()
+            _mcmc_refine_step(opt, gaussians, iteration, scene)
         else:
             try:
                 freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
                 rotationmask = torch.logical_not(gaussians.omegamask)
-                freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask) #uncomment freezeweight... for fast traning speed.
+                freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask)
             except:
                 pass
             if iteration % 1000 == 500 :
-                zmask = gaussians._xyz[:,2] < 4.5  # 
-                gaussians.prune_points(zmask) 
+                zmask = gaussians._xyz[:,2] < 4.5  # n3d-specific z-prune for stability
+                gaussians.prune_points(zmask)
                 torch.cuda.empty_cache()
-            if iteration == 10000: 
+            if iteration == 10000:
                 removeminmax(gaussians, maxbounds, minbounds)
         return flag
-    
-    elif densify == 2: # n3d 
-        if iteration < opt.densify_until_iter :
+
+    elif densify == 2: # n3d
+        if iteration < opt.mcmc_refine_stop:
             if iteration ==  8001 : # 8001
-                omegamask = gaussians.zero_omegabymotion() #
+                omegamask = gaussians.zero_omegabymotion()
                 gaussians.omegamask  = omegamask
                 scene.recordpoints(iteration, "seperate omega"+str(torch.sum(omegamask).item()))
             elif iteration > 8001: # 8001
-                if gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
+                if gaussians.omegamask is None or gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
                     omegamask = gaussians.zero_omegabymotion()
                     gaussians.omegamask = omegamask
                     scene.recordpoints(iteration, "seperate omega"+str(torch.sum(omegamask).item()))
                 freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
                 rotationmask = torch.logical_not(gaussians.omegamask)
                 freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask)
-            if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                if flag < opt.desicnt:
-                    scene.recordpoints(iteration, "before densify")
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_pruneclone(opt.densify_grad_threshold, opt.opthr, scene.cameras_extent, size_threshold)
-                    flag+=1
-                    scene.recordpoints(iteration, "after densify")
-                else:
-                    prune_mask =  (gaussians.get_opacity < opt.opthr).squeeze()
-                    gaussians.prune_points(prune_mask)
-                    torch.cuda.empty_cache()
-                    scene.recordpoints(iteration, "addionally prune_mask")
-            if iteration % 3000 == 0 :
-                gaussians.reset_opacity()
+            _mcmc_refine_step(opt, gaussians, iteration, scene)
         else:
             if iteration % 1000 == 500 :
                 zmask = gaussians._xyz[:,2] < 4.5  # for stability
                 gaussians.prune_points(zmask)
                 torch.cuda.empty_cache()
         return flag
-    
+
 
     elif densify == 3: # techni
-        if iteration < opt.densify_until_iter and iteration < opt.iterations:
-            gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-            gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-
-            if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                if flag < opt.desicnt:
-                    scene.recordpoints(iteration, "before densify")
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_pruneclone(opt.densify_grad_threshold, opt.opthr, scene.cameras_extent, size_threshold)
-                    flag+=1
-                    scene.recordpoints(iteration, "after densify")
-                else:
-                    if iteration < 7000 : # defalt 7000.
-                        prune_mask =  (gaussians.get_opacity < opt.opthr).squeeze()
-                        gaussians.prune_points(prune_mask)
-                        torch.cuda.empty_cache()
-                        scene.recordpoints(iteration, "addionally prune_mask")
-            if iteration % opt.opacity_reset_interval == 0 :
-                gaussians.reset_opacity()
+        if iteration < opt.mcmc_refine_stop and iteration < opt.iterations:
+            _mcmc_refine_step(opt, gaussians, iteration, scene)
         else:
             if gaussians.omegamask is None or gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
                 omegamask = gaussians.zero_omegabymotion()

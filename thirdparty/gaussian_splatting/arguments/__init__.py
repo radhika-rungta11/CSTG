@@ -141,6 +141,17 @@ class OptimizationParams(ParamGroup):
         self.removescale = 5
 
         self.mask_prune_iter = 1_000
+        # MCMC port (gsplat-style relocate / sample_add / inject_noise).
+        # Default schedule targets a 30k-iter run; train.py auto-scales these
+        # idempotently when opt.iterations differs and all four schedule knobs
+        # are still at their defaults.
+        self.mcmc_cap_max = 3_000_000
+        self.mcmc_noise_lr = 0.0       # OFF by default; opt in per-scene
+        self.mcmc_refine_start = 500
+        self.mcmc_refine_stop = 25_000
+        self.mcmc_refine_every = 100
+        self.mcmc_min_opacity = 0.005
+        self.mcmc_noise_stop = 25_000
         self.rvq_iter = 24_000
         self.mask_lr = 0.01
         self.net_lr = 0.001
