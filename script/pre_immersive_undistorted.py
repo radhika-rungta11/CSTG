@@ -31,6 +31,8 @@ import natsort
 
 import struct
 import pickle
+import sys
+sys.path.append(".")
 from scipy.spatial.transform import Rotation
 from thirdparty.gaussian_splatting.utils.my_utils import rotmat2qvec
 from thirdparty.colmap.pre_colmap import * 

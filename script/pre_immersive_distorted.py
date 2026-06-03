@@ -34,6 +34,8 @@ import natsort
 
 import struct
 import pickle
+import sys
+sys.path.append(".")
 from scipy.spatial.transform import Rotation
 from thirdparty.gaussian_splatting.utils.my_utils import posetow2c_matrcs, rotmat2qvec, qvec2rotmat
 from thirdparty.gaussian_splatting.utils.graphics_utils import focal2fov, fov2focal
