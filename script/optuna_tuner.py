@@ -58,7 +58,11 @@ def suggest_params(trial, base_config):
     config["mask_lr"] = trial.suggest_float("mask_lr", 0.003, 0.02, log=True)
 
     # Densification — MCMC (gsplat-style relocate / sample_add).
-    config["mcmc_cap_max"] = trial.suggest_int("mcmc_cap_max", 1_000_000, 5_000_000, step=500_000)
+    # cap_max upper bound stays well below the RVQ OOM regime: at 2.5M Gaussians
+    # with rvq_size=256 the gumbel one-hot allocation is ~2.5 GiB, comfortably
+    # under typical 40 GiB-class GPU headroom alongside the optimizer + autograd
+    # working set. See the grass v4 vs v5 OOM at 3.13M × 256 (5.95 GiB needed).
+    config["mcmc_cap_max"] = trial.suggest_int("mcmc_cap_max", 1_000_000, 2_500_000, step=500_000)
     config["mcmc_noise_lr"] = trial.suggest_categorical("mcmc_noise_lr", [0.0, 1e3, 1e4, 5e4])
     config["mcmc_refine_every"] = trial.suggest_int("mcmc_refine_every", 50, 300, step=50)
     config["mcmc_min_opacity"] = trial.suggest_float("mcmc_min_opacity", 0.001, 0.05, log=True)
@@ -79,8 +83,12 @@ def suggest_params(trial, base_config):
 
     # Model capacity
     config["max_hashmap"] = trial.suggest_int("max_hashmap", 14, 17)
-    config["rvq_size_geo"] = trial.suggest_categorical("rvq_size_geo", [256, 512, 1024])
-    config["rvq_size_temp"] = trial.suggest_categorical("rvq_size_temp", [256, 512, 1024])
+    # RVQ codebook sizes: lower bound is 64 (small but viable for tight scenes);
+    # upper bound is 256 because the gumbel one-hot at iter rvq_iter scales as
+    # N_gaussians * codebook_size in float32 (e.g. 2.5M × 256 ≈ 2.5 GiB). 512+
+    # combined with cap_max >= 2M can OOM during the RVQ phase.
+    config["rvq_size_geo"] = trial.suggest_categorical("rvq_size_geo", [64, 128, 256])
+    config["rvq_size_temp"] = trial.suggest_categorical("rvq_size_temp", [64, 128, 256])
     config["rvq_num_geo"] = trial.suggest_int("rvq_num_geo", 3, 5)
     config["rvq_num_temp"] = trial.suggest_int("rvq_num_temp", 3, 5)
 
