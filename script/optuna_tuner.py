@@ -57,6 +57,23 @@ def suggest_params(trial, base_config):
     config["opacity_lr"] = trial.suggest_float("opacity_lr", 0.01, 0.1, log=True)
     config["mask_lr"] = trial.suggest_float("mask_lr", 0.003, 0.02, log=True)
 
+    # Temporal learning rates — only meaningful when duration > 1. For
+    # single-frame scenes the temporal Parameters still get updated, but the
+    # loss never sees their full effect, so Optuna will just see noise on
+    # these dims (TPE will adapt). For multi-frame scenes these matter a lot:
+    #   omega_lr     : angular-velocity-per-frame LR
+    #   featuret_lr  : time-varying feature LR (per-Gaussian temporal feature)
+    #   trbfc_lr     : TRBF center LR (where in time each Gaussian peaks)
+    #   trbfs_lr     : TRBF scale LR (how temporally local each Gaussian is)
+    #   movelr       : per-coord motion-polynomial LR multiplier (x1..z3)
+    #   trbfslinit   : initial log-scale of TRBF; larger = wider temporal kernel
+    config["omega_lr"] = trial.suggest_float("omega_lr", 1e-5, 1e-3, log=True)
+    config["featuret_lr"] = trial.suggest_float("featuret_lr", 1e-4, 1e-2, log=True)
+    config["trbfc_lr"] = trial.suggest_float("trbfc_lr", 1e-5, 1e-3, log=True)
+    config["trbfs_lr"] = trial.suggest_float("trbfs_lr", 0.005, 0.1, log=True)
+    config["movelr"] = trial.suggest_float("movelr", 1.0, 10.0)
+    config["trbfslinit"] = trial.suggest_categorical("trbfslinit", [0.0, 1.0, 2.0, 3.0])
+
     # Densification — MCMC (gsplat-style relocate / sample_add).
     # cap_max upper bound stays well below the RVQ OOM regime: at 2.5M Gaussians
     # with rvq_size=256 the gumbel one-hot allocation is ~2.5 GiB, comfortably

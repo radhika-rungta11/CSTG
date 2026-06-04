@@ -177,10 +177,19 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
             midw =  int(viewpoint_cam.image_width/2)
             
             depth = render_pkg["depth"]
-            slectemask = depth != 15.0 
+            slectemask = depth != 15.0
 
-            validdepthdict[viewpoint_cam.image_name] = torch.median(depth[slectemask]).item()   
-            depthdict[viewpoint_cam.image_name] = torch.amax(depth[slectemask]).item() 
+            # If no Gaussians render to this camera at iter 0 (common in
+            # multi-frame setups where the sparse SfM cloud doesn't cover all
+            # viewpoints), fall back to the far-plane sentinel. depthdict is
+            # only read later by addgaussians() as depthmax; 15.0 is the safe
+            # upper bound the rasterizer itself uses.
+            if slectemask.any():
+                validdepthdict[viewpoint_cam.image_name] = torch.median(depth[slectemask]).item()
+                depthdict[viewpoint_cam.image_name] = torch.amax(depth[slectemask]).item()
+            else:
+                validdepthdict[viewpoint_cam.image_name] = 15.0
+                depthdict[viewpoint_cam.image_name] = 15.0
     
     if densify == 1 or  densify == 2: 
         zmask = gaussians._xyz[:,2] < 4.5  
