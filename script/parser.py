@@ -60,6 +60,146 @@ import sys
 import numpy as np
 
 
+# --- .4dgs.gz recenter helpers --------------------------------------------
+# Shifts the xyz block in a (gzipped) .4dgs so the content's chosen pivot
+# lands at the local origin. The runtime computes splat bounds from xyz at
+# load time and quantises positions relative to those bounds, so shifting
+# xyz in the file shifts the bounds too. Motion / scale / rotation / opacity
+# / colour blocks are translation-invariant, so we only rewrite xyz.
+#
+# A trailing OFFS block (b"OFFS" + 3xfloat32 LE) records the cumulative
+# translation subtracted, so the renderer can add it back when feeding the
+# RGB decoder's camera-position input (the decoder is anchored to the
+# original training coordinate frame): P_orig = P_new + offset.
+
+_RECENTER_HEADER_FMT = "<4sII"  # magic, version, N
+_RECENTER_HEADER_SIZE = struct.calcsize(_RECENTER_HEADER_FMT)
+_RECENTER_OFFS_MAGIC = b"OFFS"
+_RECENTER_OFFS_BLOCK_SIZE = 4 + 3 * 4  # magic + 3 float32
+
+RECENTER_MODES = (
+    "bottom_center",
+    "centroid",
+    "median",
+    "mean",
+    "median_bottom",
+    "none",
+)
+
+
+def _recenter_split_offset(buf):
+    """Strip a trailing OFFS block if present; return (buf_without_block, offset)."""
+    sz = _RECENTER_OFFS_BLOCK_SIZE
+    if len(buf) >= sz and buf[-sz:-12] == _RECENTER_OFFS_MAGIC:
+        offset = np.frombuffer(buf[-12:], dtype="<f4").astype(np.float32).copy()
+        return buf[:-sz], offset
+    return buf, np.zeros(3, dtype=np.float32)
+
+
+def _recenter_read(path):
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        buf = gzip.decompress(raw)
+        gzipped = True
+    except OSError:
+        buf = raw
+        gzipped = False
+    return buf, gzipped
+
+
+def _recenter_write(path, buf, gzipped):
+    out = gzip.compress(buf) if gzipped else buf
+    with open(path, "wb") as f:
+        f.write(out)
+
+
+def _recenter_parse_header(buf):
+    magic, version, n = struct.unpack_from(_RECENTER_HEADER_FMT, buf, 0)
+    if magic != b"4DGS":
+        raise ValueError(f"recenter: bad magic: {magic!r}")
+    if version != 3:
+        raise ValueError(f"recenter: unsupported version: {version} (expected 3)")
+    return n
+
+
+def _recenter_compute_pivot(xyz, mode):
+    xyz32 = xyz.astype(np.float32, copy=False)
+    mn = xyz32.min(axis=0)
+    mx = xyz32.max(axis=0)
+    c = 0.5 * (mn + mx)
+    if mode == "none":
+        return np.zeros(3, dtype=np.float32), mn, mx
+    if mode == "centroid":
+        return c.astype(np.float32), mn, mx
+    if mode == "median":
+        return np.median(xyz32, axis=0).astype(np.float32), mn, mx
+    if mode == "mean":
+        return xyz32.mean(axis=0).astype(np.float32), mn, mx
+    if mode == "median_bottom":
+        med = np.median(xyz32, axis=0)
+        return np.array([med[0], mn[1], med[2]], dtype=np.float32), mn, mx
+    # bottom_center (default)
+    return np.array([c[0], mn[1], c[2]], dtype=np.float32), mn, mx
+
+
+def recenter_4dgs(path, mode="median", output=None):
+    """Shift the xyz block in a .4dgs / .4dgs.gz file so the chosen pivot
+    lands at the local origin. Accumulates with any prior OFFS block.
+
+    Args:
+        path: input .4dgs[.gz] path
+        mode: one of RECENTER_MODES
+        output: write here (default: overwrite path).
+
+    Returns the cumulative offset (np.float32 array of shape (3,)).
+    """
+    if mode not in RECENTER_MODES:
+        raise ValueError(f"recenter: unknown mode {mode!r}, expected one of {RECENTER_MODES}")
+    buf, gzipped = _recenter_read(path)
+    buf, existing_offset = _recenter_split_offset(buf)
+    n = _recenter_parse_header(buf)
+
+    xyz_off = _RECENTER_HEADER_SIZE
+    xyz_bytes = n * 3 * 2  # float16
+    xyz = (
+        np.frombuffer(buf, dtype=np.float16, count=n * 3, offset=xyz_off)
+        .reshape(n, 3)
+        .copy()
+    )
+
+    pivot, mn, mx = _recenter_compute_pivot(xyz, mode)
+    print(f"[recenter] file:     {path}")
+    print(f"[recenter] N:        {n}")
+    print(f"[recenter] gzipped:  {gzipped}")
+    print(f"[recenter] bounds min: {mn}")
+    print(f"[recenter] bounds max: {mx}")
+    print(f"[recenter] midpoint:   {0.5 * (mn + mx)}")
+    print(f"[recenter] mode:     {mode}")
+    print(f"[recenter] pivot:    {pivot}  (subtract from every xyz)")
+
+    shifted = (xyz.astype(np.float32) - pivot).astype(np.float16)
+    new_buf = bytearray(buf)
+    new_buf[xyz_off : xyz_off + xyz_bytes] = shifted.tobytes()
+
+    total_offset = (existing_offset + pivot).astype(np.float32)
+    new_buf += _RECENTER_OFFS_MAGIC + total_offset.astype("<f4").tobytes()
+
+    out_path = output or path
+    _recenter_write(out_path, bytes(new_buf), gzipped)
+
+    new_mn = shifted.astype(np.float32).min(axis=0)
+    new_mx = shifted.astype(np.float32).max(axis=0)
+    print(f"[recenter] stored offset (P_orig = P_new + offset): {total_offset}")
+    print(f"[recenter] wrote: {out_path}")
+    print(f"[recenter] new bounds min: {new_mn}")
+    print(f"[recenter] new bounds max: {new_mx}")
+    return total_offset
+
+
+# --- end recenter helpers --------------------------------------------------
+
+
 def to_numpy(v):
     """Convert torch tensor or numpy array to numpy."""
     if hasattr(v, "cpu"):
@@ -439,6 +579,18 @@ def main():
         help="Model log directory (e.g. log/cube_v3) or direct path to _pp.npz",
     )
     parser.add_argument("--output", default=None, help="Output .4dgs.gz file (optional)")
+    parser.add_argument(
+        "--recenter-mode",
+        default="median",
+        choices=list(RECENTER_MODES),
+        help="Pivot mode for the post-write recenter step. 'none' = (0,0,0) "
+             "shift (still writes an OFFS block of zeros). Default: median.",
+    )
+    parser.add_argument(
+        "--no-recenter",
+        action="store_true",
+        help="Skip the recenter step entirely. Output .4dgs.gz keeps the training-frame xyz.",
+    )
     args = parser.parse_args()
 
     input_path = args.input
@@ -472,6 +624,10 @@ def main():
     data = load_pp_npz(input_path)
     write_binary(data, args.output)
     print("Done!")
+
+    if not args.no_recenter:
+        print()
+        recenter_4dgs(args.output, mode=args.recenter_mode)
 
 
 if __name__ == "__main__":
