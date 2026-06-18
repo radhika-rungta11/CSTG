@@ -74,15 +74,38 @@ def suggest_params(trial, base_config):
     config["movelr"] = trial.suggest_float("movelr", 1.0, 10.0)
     config["trbfslinit"] = trial.suggest_categorical("trbfslinit", [0.0, 1.0, 2.0, 3.0])
 
-    # Densification — MCMC (gsplat-style relocate / sample_add).
-    # cap_max upper bound stays well below the RVQ OOM regime: at 2.5M Gaussians
-    # with rvq_size=256 the gumbel one-hot allocation is ~2.5 GiB, comfortably
-    # under typical 40 GiB-class GPU headroom alongside the optimizer + autograd
-    # working set. See the grass v4 vs v5 OOM at 3.13M × 256 (5.95 GiB needed).
-    config["mcmc_cap_max"] = trial.suggest_int("mcmc_cap_max", 1_000_000, 2_500_000, step=500_000)
-    config["mcmc_noise_lr"] = trial.suggest_categorical("mcmc_noise_lr", [0.0, 1e3, 1e4, 5e4])
-    config["mcmc_refine_every"] = trial.suggest_int("mcmc_refine_every", 50, 300, step=50)
-    config["mcmc_min_opacity"] = trial.suggest_float("mcmc_min_opacity", 0.001, 0.05, log=True)
+    # Densification — choose the densifier itself, then sweep only that
+    # densifier's knobs (Optuna handles the conditional search space). This is
+    # the key win of the taming-3dgs port: MCMC reaches a target count
+    # *indirectly* by tuning mcmc_cap_max + refine cadence, whereas taming
+    # *sets* the final Gaussian count via taming_budget, so the capacity
+    # dimension collapses from a search to a single directly-controlled value.
+    config["densify_mode"] = trial.suggest_categorical("densify_mode", ["mcmc", "taming"])
+    if config["densify_mode"] == "mcmc":
+        # cap_max upper bound stays well below the RVQ OOM regime: at 2.5M
+        # Gaussians with rvq_size=256 the gumbel one-hot allocation is ~2.5 GiB,
+        # comfortably under typical 40 GiB-class GPU headroom alongside the
+        # optimizer + autograd working set. See the grass v4 vs v5 OOM at
+        # 3.13M × 256 (5.95 GiB needed).
+        config["mcmc_cap_max"] = trial.suggest_int("mcmc_cap_max", 1_000_000, 2_500_000, step=500_000)
+        config["mcmc_noise_lr"] = trial.suggest_categorical("mcmc_noise_lr", [0.0, 1e3, 1e4, 5e4])
+        config["mcmc_refine_every"] = trial.suggest_int("mcmc_refine_every", 50, 300, step=50)
+        config["mcmc_min_opacity"] = trial.suggest_float("mcmc_min_opacity", 0.001, 0.05, log=True)
+    else:  # taming: final count is set directly, not searched
+        # Use final_count mode so the budget is directly comparable to (and
+        # bounded by) the same OOM-safe ceiling as mcmc_cap_max above.
+        config["taming_budget_mode"] = "final_count"
+        config["taming_budget"] = trial.suggest_int("taming_budget", 1_000_000, 2_500_000, step=500_000)
+        config["taming_grad_threshold"] = trial.suggest_float("taming_grad_threshold", 1e-4, 5e-4, log=True)
+        config["taming_min_opacity"] = trial.suggest_float("taming_min_opacity", 0.001, 0.05, log=True)
+        config["taming_prune"] = trial.suggest_categorical("taming_prune", [0, 1])
+        # Score-coefficient weights (Gaussian-level signals).
+        config["taming_w_grad"] = trial.suggest_float("taming_w_grad", 0.0, 2.0)
+        config["taming_w_opacity"] = trial.suggest_float("taming_w_opacity", 0.0, 2.0)
+        config["taming_w_scale"] = trial.suggest_float("taming_w_scale", 0.0, 2.0)
+        config["taming_w_radii"] = trial.suggest_float("taming_w_radii", 0.0, 2.0)
+        # Silence MCMC position noise so it can't perturb the taming run.
+        config["mcmc_noise_lr"] = 0.0
 
     # Pruning and masking
     config["lambda_mask"] = trial.suggest_float("lambda_mask", 0.0002, 0.005, log=True)

@@ -296,6 +296,14 @@ def train(dataset, opt, pipe, saving_iterations, debug_from, densify=0, duration
                         ssimdict[viewpoint_cam.image_name] = ssim(image.clone().detach(), gt_image.clone().detach()).item()
                 
                 loss.backward()
+                # Taming densifier ranks Gaussians by view-space gradient +
+                # screen radii, so accumulate those per render while inside the
+                # densification window. MCMC needs neither, so this is gated and
+                # leaves the default path untouched. Must run before zero_grad,
+                # while viewspace_point_tensor.grad is still populated.
+                if getattr(opt, "densify_mode", "mcmc") == "taming" and iteration < opt.densify_until_iter:
+                    from taming import accumulate_densification_stats
+                    accumulate_densification_stats(gaussians, viewspace_point_tensor, visibility_filter, radii)
                 gaussians.cache_gradient()
                 gaussians.optimizer.zero_grad(set_to_none = True)# 
 

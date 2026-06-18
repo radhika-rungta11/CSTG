@@ -152,6 +152,31 @@ class OptimizationParams(ParamGroup):
         self.mcmc_refine_every = 100
         self.mcmc_min_opacity = 0.005
         self.mcmc_noise_stop = 25_000
+
+        # ------------------------------------------------------------------
+        # Taming-3DGS steerable densification (alternative to MCMC).
+        # densify_mode selects the densifier used inside controlgaussians:
+        #   "mcmc"   -> existing gsplat-style relocate/sample_add (default;
+        #               leaves all behaviour byte-for-byte unchanged)
+        #   "taming" -> score-ranked clone/split driven by a deterministic
+        #               per-step Gaussian-count budget (taming/ package)
+        # In "taming" mode the final primitive count is *set* directly via
+        # taming_budget rather than searched indirectly through mcmc_cap_max,
+        # which is what shrinks the Optuna search space.
+        self.densify_mode = "mcmc"            # "mcmc" | "taming"
+        self.taming_budget = 2.0              # multiplier of SfM count, or absolute final count
+        self.taming_budget_mode = "multiplier"  # "multiplier" | "final_count"
+        self.taming_grad_threshold = 0.0002   # min view-space grad to qualify for clone/split
+        self.taming_min_opacity = 0.005       # opacity prune floor
+        self.taming_prune = 1                 # 1 = run the score-weighted opacity/size prune
+        # Score coefficients (Gaussian-level signals; per-pixel rasterizer
+        # accumulation terms from upstream taming are unavailable in CSTG's
+        # spacetime rasterizer — see taming/README.md).
+        self.taming_w_grad = 1.0
+        self.taming_w_opacity = 1.0
+        self.taming_w_scale = 1.0
+        self.taming_w_radii = 1.0
+
         self.rvq_iter = 24_000
         self.mask_lr = 0.01
         self.net_lr = 0.001

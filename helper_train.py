@@ -199,6 +199,18 @@ def _mcmc_sanity(g, it):
         print(f"[mcmc-sanity] iter={it}: " + "; ".join(bad), flush=True)
 
 
+def _densify_refine_step(opt, gaussians, iteration, scene):
+    """Dispatch to the configured densifier: MCMC (default) or taming.
+
+    The taming densifier lives in the self-contained `taming/` package; it is
+    imported lazily so the MCMC path carries no extra import cost."""
+    if getattr(opt, "densify_mode", "mcmc") == "taming":
+        from taming import densify_step as taming_densify_step
+        taming_densify_step(opt, gaussians, iteration, scene)
+    else:
+        _mcmc_refine_step(opt, gaussians, iteration, scene)
+
+
 def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filter, radii, viewspace_point_tensor, flag, traincamerawithdistance=None, maxbounds=None, minbounds=None):
     if densify == 1: # n3d
         if iteration < opt.mcmc_refine_stop:
@@ -214,7 +226,7 @@ def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filt
                 freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
                 rotationmask = torch.logical_not(gaussians.omegamask)
                 freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask)
-            _mcmc_refine_step(opt, gaussians, iteration, scene)
+            _densify_refine_step(opt, gaussians, iteration, scene)
         else:
             try:
                 freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
@@ -244,7 +256,7 @@ def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filt
                 freezweightsbymasknounsqueeze(gaussians, ["_omega"], gaussians.omegamask)
                 rotationmask = torch.logical_not(gaussians.omegamask)
                 freezweightsbymasknounsqueeze(gaussians, ["_rotation"], rotationmask)
-            _mcmc_refine_step(opt, gaussians, iteration, scene)
+            _densify_refine_step(opt, gaussians, iteration, scene)
         else:
             if iteration % 1000 == 500 :
                 zmask = gaussians._xyz[:,2] < 4.5  # for stability
@@ -255,7 +267,7 @@ def controlgaussians(opt, gaussians, densify, iteration, scene,  visibility_filt
 
     elif densify == 3: # techni
         if iteration < opt.mcmc_refine_stop and iteration < opt.iterations:
-            _mcmc_refine_step(opt, gaussians, iteration, scene)
+            _densify_refine_step(opt, gaussians, iteration, scene)
         else:
             if gaussians.omegamask is None or gaussians.omegamask.shape[0] != gaussians.get_xyz.shape[0]:
                 omegamask = gaussians.zero_omegabymotion()
